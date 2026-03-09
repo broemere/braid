@@ -1,7 +1,10 @@
 import numpy as np
 import pyqtgraph as pg
 from PySide6.QtCore import Slot
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QButtonGroup, QFrame, QLabel
+from PySide6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
+    QButtonGroup, QFrame, QLabel, QDoubleSpinBox
+)
 from data_pipeline import DataPipeline
 from config import PLOT_COLORS
 
@@ -13,6 +16,7 @@ class PlotTab(QWidget):
 
         self.pipeline = pipeline
         self.data = np.array([])
+        self.data_trimmed = np.array([])  # Active data for UI display
         self.unique_cycles = []
         self.plot_data_items = []
 
@@ -26,6 +30,8 @@ class PlotTab(QWidget):
         self.cycle_selection_group.buttonClicked.connect(self._on_cycle_selection_changed)
         self.cycle_selection_group.buttonClicked.connect(self.update_plot)
         self.plot_selection_group.buttonClicked.connect(self.update_plot)
+        self.trim_button.clicked.connect(self.apply_trimming)
+        self.reset_trim_button.clicked.connect(self.reset_trimming)
 
     def _init_ui(self):
         main_layout = QHBoxLayout(self)
@@ -33,10 +39,16 @@ class PlotTab(QWidget):
         # --- Controls Panel ---
         controls_layout = QVBoxLayout()
         controls_layout.setSpacing(20)
-        plot_selection_widget = self._create_plot_selection_controls()  # Time v Force, Time v Distance, Distance v Force
+
+        plot_selection_widget = self._create_plot_selection_controls()
         controls_layout.addWidget(plot_selection_widget)
-        self.cycle_selection_widget = self._create_cycle_selection_container()  # All Cycles, Cycle 0, ..., Last Cycle
+
+        self.cycle_selection_widget = self._create_cycle_selection_container()
         controls_layout.addWidget(self.cycle_selection_widget)
+
+        self.trimming_widget = self._create_trimming_controls()
+        controls_layout.addWidget(self.trimming_widget)
+
         controls_layout.addStretch()  # Push buttons to the top
 
         # --- Plot ---
@@ -99,6 +111,32 @@ class PlotTab(QWidget):
         self.cycle_selection_group.setExclusive(True)
         return container
 
+    def _create_trimming_controls(self):
+        """Creates the container for the data trimming feature."""
+        container = QFrame()
+        container.setFrameShape(QFrame.StyledPanel)
+        layout = QVBoxLayout(container)
+
+        title_label = QLabel("Optional: Trim data at time:")
+        title_label.setWordWrap(True)  # Allows text to drop to the next line instead of cutting off
+        title_label.setStyleSheet("font-weight: bold; font-size: 14px; margin-bottom: 5px;")
+        layout.addWidget(title_label)
+
+        self.trim_spinbox = QDoubleSpinBox()
+        self.trim_spinbox.setMinimum(0.0)
+        #self.trim_spinbox.setDecimals(3)
+        self.trim_spinbox.setSingleStep(0.5)
+        self.trim_spinbox.setSuffix(" sec")  # Appends the unit inside the spinbox natively
+        layout.addWidget(self.trim_spinbox)
+
+        self.trim_button = QPushButton("Trim Data")
+        layout.addWidget(self.trim_button)
+
+        self.reset_trim_button = QPushButton("Reset")
+        layout.addWidget(self.reset_trim_button)
+
+        return container
+
     def _rebuild_cycle_buttons(self):
         """Clears and rebuilds the cycle filter buttons based on current data."""
         # Clear old buttons from layout
@@ -130,6 +168,31 @@ class PlotTab(QWidget):
             self.cycle_buttons_layout.addWidget(btn)
             self.cycle_selection_group.addButton(btn)
 
+    def _restore_selections(self):
+        """Helper to maintain active toggle buttons after rebuilds."""
+        saved_plot_text = self.pipeline.plot_selection
+        plot_btn_found = False
+        for button in self.plot_selection_group.buttons():
+            if button.text() == saved_plot_text:
+                button.setChecked(True)
+                plot_btn_found = True
+                break
+
+        if not plot_btn_found and self.plot_selection_group.buttons():
+            self.plot_selection_group.buttons()[0].setChecked(True)
+
+        saved_cycle_text = self.pipeline.cycle_selection
+        cycle_btn_found = False
+        for button in self.cycle_selection_group.buttons():
+            if button.text() == saved_cycle_text:
+                button.setChecked(True)
+                cycle_btn_found = True
+                break
+
+        if not cycle_btn_found and self.cycle_selection_group.buttons():
+            default_button = self.cycle_selection_group.buttons()[0]  # "All Cycles"
+            default_button.setChecked(True)
+
     def update_plot(self):
         """Core function to update the plot based on current button selections."""
 
@@ -140,7 +203,7 @@ class PlotTab(QWidget):
 
         # --- 1. Get Selected Plot Type ---
         checked_plot_btn = self.plot_selection_group.checkedButton()
-        if not checked_plot_btn or self.data.size == 0:
+        if not checked_plot_btn or self.data_trimmed.size == 0:
             return
 
         plot_props = checked_plot_btn.property("data_key")
@@ -152,47 +215,35 @@ class PlotTab(QWidget):
             return
 
         cycle_to_plot = checked_cycle_btn.property("data_key")
-        cycle_text = checked_cycle_btn.text()  # Get button text for title
+        cycle_text = checked_cycle_btn.text()
 
         if cycle_to_plot == -1:  # 'All'
-            sliced_data = self.data
+            sliced_data = self.data_trimmed
         elif cycle_to_plot == -2:  # 'Last'
             if not self.unique_cycles.size:
                 return
             last_cycle = self.unique_cycles[-1]
-            mask = self.data["cycle"] == last_cycle
-            sliced_data = self.data[mask]
+            mask = self.data_trimmed["cycle"] == last_cycle
+            sliced_data = self.data_trimmed[mask]
         else:  # Specific cycle number
-            mask = self.data["cycle"] == cycle_to_plot
-            sliced_data = self.data[mask]
+            mask = self.data_trimmed["cycle"] == cycle_to_plot
+            sliced_data = self.data_trimmed[mask]
 
         if sliced_data.size == 0:
-            return  # Nothing to plot
+            return
 
-        # --- 3. Plot Sliced Data (one line per cycle) ---
-
-        # Find the unique cycles *within the data slice*
-        # This handles all cases:
-        # - "All Cycles" -> [1, 2, 3, ...]
-        # - "Last Cycle" -> [5] (if 5 is last)
-        # - "Cycle 3"    -> [3]
+            # --- 3. Plot Sliced Data (one line per cycle) ---
         cycles_in_slice = np.unique(sliced_data["cycle"])
 
         for i, cycle_num in enumerate(cycles_in_slice):
-            # Get color, wrapping around the list using modulo
             color = PLOT_COLORS[int(cycle_num) % len(PLOT_COLORS)]
-
-            # Get data for *this specific cycle* from the slice
             cycle_mask = sliced_data["cycle"] == cycle_num
             cycle_data = sliced_data[cycle_mask]
 
             x_data = cycle_data[x_key]
             y_data = cycle_data[y_key]
-
-            # Set name for the legend
             name = f"Cycle {int(cycle_num)}"
 
-            # Plot this cycle's data and add the item to our list
             pen = {"color": color, "width": 2}
             plot = self.plot_item.plot(x_data, y_data, pen=pen, name=name)
             self.plot_data_items.append(plot)
@@ -204,9 +255,36 @@ class PlotTab(QWidget):
         bottom_axis.setLabel(text=x_label, color='#ffffff', font_size='14pt')
         left_axis.setLabel(text=y_label, color='#ffffff', font_size='14pt')
 
-        # Combine the base title with the selected cycle's text
         full_title = f"{title} - {cycle_text}"
         self.plot_item.setTitle(full_title, color='#ffffff', size='16pt')
+
+    @Slot()
+    def apply_trimming(self):
+        """Slices the data up to the time entered in the spinbox."""
+        if self.data.size == 0:
+            return
+
+        trim_time = self.trim_spinbox.value()
+
+        # Slice original data up to and including the entered time
+        mask = self.data["time_s"] <= trim_time
+        self.data_trimmed = self.data[mask]
+        self.unique_cycles = np.unique(self.data_trimmed["cycle"])
+        if trim_time != float(np.max(self.data["time_s"])):
+            print(f"Trimming applied at {trim_time}")
+
+        # Update the UI
+        self._rebuild_cycle_buttons()
+        self._restore_selections()
+        self.update_plot()
+
+        self.pipeline.set_trimmed_data(trim_time, self.data_trimmed)
+
+    @Slot()
+    def reset_trimming(self):
+        """Resets the trim time to the maximum dataset time and applies it."""
+        self.trim_spinbox.setValue(self.trim_spinbox.maximum())
+        self.apply_trimming()
 
     @Slot(QPushButton)
     def _on_plot_selection_changed(self, button: QPushButton):
@@ -220,7 +298,6 @@ class PlotTab(QWidget):
         if button:
             self.pipeline.set_cycle_selection(button.text())
 
-
     @Slot(dict)
     def on_new_data_received(self, data: dict):
         """
@@ -230,47 +307,27 @@ class PlotTab(QWidget):
         if not data or "cycle" not in data:
             print("PlotTab received invalid or empty data.")
             self.data = np.array([])
+            self.data_trimmed = np.array([])
             self.unique_cycles = []
         else:
             print("PlotTab received new data.")
-            # Convert incoming dictionary to a structured numpy array for easier handling
             try:
                 dtype = [(key, 'f8' if key != 'cycle' else 'i4') for key in data.keys()]
                 records = list(zip(*data.values()))
                 self.data = np.array(records, dtype=dtype)
-                self.unique_cycles = np.unique(self.data["cycle"])
+                self.data_trimmed = np.copy(self.data)
+                self.unique_cycles = np.unique(self.data_trimmed["cycle"])
+
+                # Update Spinbox defaults to match new data maximums
+                max_time = float(np.max(self.data["time_s"]))
+                self.trim_spinbox.setMaximum(max_time)
+                self.trim_spinbox.setValue(max_time)
+
             except Exception as e:
                 print(f"Could not convert data dictionary to structured numpy array: {e}")
                 self.data = np.array([])
+                self.data_trimmed = np.array([])
                 self.unique_cycles = []
+                self.trim_spinbox.setMaximum(0.0)
 
-        # Rebuild the dynamic parts of the UI
-        self._rebuild_cycle_buttons()
-
-        saved_plot_text = self.pipeline.plot_selection
-        plot_btn_found = False
-        for button in self.plot_selection_group.buttons():
-            if button.text() == saved_plot_text:
-                button.setChecked(True)
-                plot_btn_found = True
-                break
-        # Fallback if saved button (e.g., from a future version) isn't found
-        if not plot_btn_found and self.plot_selection_group.buttons():
-            self.plot_selection_group.buttons()[0].setChecked(True)
-
-        saved_cycle_text = self.pipeline.cycle_selection
-        cycle_btn_found = False
-        for button in self.cycle_selection_group.buttons():
-            if button.text() == saved_cycle_text:
-                button.setChecked(True)
-                cycle_btn_found = True
-                break
-
-        # Fallback if saved cycle (e.g., "Cycle 5") isn't in the new data
-        if not cycle_btn_found and self.cycle_selection_group.buttons():
-            default_button = self.cycle_selection_group.buttons()[0]  # "All Cycles"
-            default_button.setChecked(True)
-
-        # Trigger the plot update
-        print(self.data)
-        self.update_plot()
+        self.apply_trimming()

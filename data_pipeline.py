@@ -33,6 +33,9 @@ class DataPipeline(QObject):
     plot_selection_changed = Signal(str)
     cycle_selection_changed = Signal(str)
 
+    trimmed_data_available = Signal(object)  # 'object' is safest for passing numpy arrays
+    trim_time_changed = Signal(float)
+
     # Scale inputs
     known_length_changed = Signal(float)
     pixel_length_changed = Signal(float)
@@ -74,6 +77,8 @@ class DataPipeline(QObject):
         # PLOT TAB
         self.plot_selection: str = "Time vs. Force"
         self.cycle_selection: str = "All Cycles"
+        self.trim_time: float = 0.0
+        self.data_trimmed = None
 
         # SCALE TAB
         self.known_length = 0.0
@@ -98,6 +103,19 @@ class DataPipeline(QObject):
         self.width_roi_idx = 0
         self.thickness_roi_idx = 1
 
+    @Slot(float, object)
+    def set_trimmed_data(self, trim_time: float, trimmed_data: np.ndarray):
+        """Receives trimmed data from the PlotTab and broadcasts it to the rest of the app."""
+        self.trim_time = trim_time
+        self.data_trimmed = trimmed_data
+
+        log.info(f"Data trimmed at {self.trim_time}s. Broadcasting new data.")
+
+        self._recalculate_roi_indices()
+
+        # Emit signals so other tabs can update
+        self.trim_time_changed.emit(self.trim_time)
+        self.trimmed_data_available.emit(self.data_trimmed)
 
     def on_author_changed(self, new_author):
         self.author = new_author
@@ -133,11 +151,11 @@ class DataPipeline(QObject):
         self.frame_count = next(it)
         log.info(f"Frame count found: {self.frame_count}")
         log.info(f"Data keys: {result['data'].keys()}")
-        log.info(f"Data found: {result['data']}")
+        #log.info(f"Data found: {result['data']}")
         self.data = result["data"]
-        self.data_available.emit(self.data)
         self.max_distance_index = np.argmax(self.data["distance"])
         self.min_distance_index = np.argmin(self.data["distance"])
+        self.data_available.emit(self.data)
         self.load_frames([self.max_distance_index, self.min_distance_index])
 
     def load_frames(self, index):
@@ -233,6 +251,38 @@ class DataPipeline(QObject):
 
 
     ### region ROI TAB
+
+    def _recalculate_roi_indices(self):
+        """Calculates min/max distance indices from the active (trimmed) dataset."""
+        if self.data_trimmed is None or self.data_trimmed.size == 0:
+            return
+
+        # np.argmax/argmin return the integer row index.
+        # Since we only trim the tail, these row indices still map correctly
+        # to the original frame indices.
+        new_max_idx = int(np.argmax(self.data_trimmed["distance"]))
+        new_min_idx = int(np.argmin(self.data_trimmed["distance"]))
+
+        frames_to_load = []
+
+        # Check if the max index got trimmed off
+        if new_max_idx != self.max_distance_index:
+            log.info(f"Max distance index changed from {self.max_distance_index} to {new_max_idx}")
+            self.max_distance_index = new_max_idx
+            frames_to_load.append(self.max_distance_index)
+
+        # Check if the min index got trimmed off
+        if new_min_idx != self.min_distance_index:
+            log.info(f"Min distance index changed from {self.min_distance_index} to {new_min_idx}")
+            self.min_distance_index = new_min_idx
+            frames_to_load.append(self.min_distance_index)
+
+        # If either index changed, send them to the worker to load the new frames.
+        # Once loaded, your existing `frame_loaded` callback will catch them
+        # and emit the image signals to update the UI automatically.
+        if frames_to_load:
+            log.info(f"Loading new ROI frames: {frames_to_load}")
+            self.load_frames(frames_to_load)
 
     def _generate_crops_for_target(self, target):
         """Helper: Slices the arrays and stores them in the roi_data dictionary."""
@@ -629,7 +679,7 @@ class DataPipeline(QObject):
             print("Cannot calculate geometry: ROIs not fully established.")
             return
 
-        distances = self.data["distance"]
+        distances = self.data_trimmed["distance"]
 
         # Package a "snapshot" so the thread doesn't read live UI variables
         snapshot_config = {
@@ -833,10 +883,10 @@ class DataPipeline(QObject):
         thickness = np.array(geom['thickness'])
         area = np.array(geom['area'])
 
-        force_mN = -np.array(self.data.get('force', []))
-        distance = np.array(self.data.get('distance', []))
-        cycle_flags = np.array(self.data.get('cycle', []))
-        time_s = np.array(self.data.get('time_s', []))
+        force_mN = -self.data_trimmed['force']
+        distance = self.data_trimmed['distance']
+        cycle_flags = self.data_trimmed['cycle']
+        time_s = self.data_trimmed['time_s']
 
         # Failsafe: Ensure arrays are perfectly aligned in length
         min_len = min(len(width), len(force_mN))

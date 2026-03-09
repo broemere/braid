@@ -202,7 +202,6 @@ def geometry_worker(signals, config: dict):
     min_dist = config['min_dist']
     max_dist = config['max_dist']
     roi_data = config['roi_data']
-    conversion_factor = config['conversion_factor'] if config['conversion_factor'] > 0 else 1.0
 
     mu = config['mu']
     gamma = config['gamma']
@@ -233,10 +232,10 @@ def geometry_worker(signals, config: dict):
                 else:
                     gray = frame.copy()
 
-                if i % 10 == 0:  # Only log every 10th frame so we don't spam the console
-                    log.info(f"--- FRAME {i} | Type {gray.dtype} ---")
-                    log.info(f"1. Frame min: {gray.min()}")
-                    log.info(f"1. Frame max: {gray.max()}")
+                # if i % 10 == 0:  # Only log every 10th frame so we don't spam the console  # Debugging
+                #     log.info(f"--- FRAME {i} | Type {gray.dtype} ---")
+                #     log.info(f"1. Frame min: {gray.min()}")
+                #     log.info(f"1. Frame max: {gray.max()}")
 
                 cv2.normalize(gray, gray, 0, 255, cv2.NORM_MINMAX)
                 gray = gray.astype(np.uint8)
@@ -290,12 +289,12 @@ def geometry_worker(signals, config: dict):
                     cleaned_mask = cv2.morphologyEx(final_mask * 255, cv2.MORPH_OPEN, kernel)
                     binary_mask = cleaned_mask // 255
 
-                    if i % 10 == 0:  # Only log every 10th frame so we don't spam the console
-                        log.info(f"--- FRAME {i} | ROI {roi_idx} ---")
-                        log.info(f"1. Crop Shape: {crop.shape}")
-                        log.info(f"2. Seed Pixels: {np.sum(seed_mask)}")
-                        log.info(f"3. Chan-Vese Pixels: {np.sum(final_mask)}")
-                        log.info(f"4. Cleaned Pixels: {np.sum(binary_mask)}")
+                    # if i % 10 == 0:  # Only log every 10th frame so we don't spam the console  ## Debugging
+                    #     log.info(f"--- FRAME {i} | ROI {roi_idx} ---")
+                    #     log.info(f"1. Crop Shape: {crop.shape}")
+                    #     log.info(f"2. Seed Pixels: {np.sum(seed_mask)}")
+                    #     log.info(f"3. Chan-Vese Pixels: {np.sum(final_mask)}")
+                    #     log.info(f"4. Cleaned Pixels: {np.sum(binary_mask)}")
 
                     # --- MASK CROPPING & STORAGE ---
                     # Find coordinates of all non-zero pixels
