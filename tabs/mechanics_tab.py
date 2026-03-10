@@ -33,7 +33,7 @@ class MechanicsTab(QWidget):
 
         # --- 2. Hysteresis Loop (Stress vs. Stretch) ---
         self.plot_hysteresis = self.plot_widget.addPlot(title="True Stress vs. Stretch")
-        self.plot_hysteresis.setLabel('bottom', 'Stretch Ratio (Width)')
+        self.plot_hysteresis.setLabel('bottom', 'Stretch Ratio (Length)')
         self.plot_hysteresis.setLabel('left', 'True Stress', units='kPa')
         self.plot_hysteresis.showGrid(x=True, y=True, alpha=0.3)
         self.curve_hysteresis = self.plot_hysteresis.plot(pen=pg.mkPen(color='#ff007f', width=2))
@@ -73,6 +73,7 @@ class MechanicsTab(QWidget):
         true_stress = np.array(data.get('true_stress_kpa', []))
         stretch_w = np.array(data.get('stretch_w', []))
         stretch_t = np.array(data.get('stretch_t', []))
+        stretch_l = np.array(data.get('stretch_l', []))
         poissons_ratio = np.array(data.get('poissons_ratio', []))
         energy_dissipated = np.array(data.get('energy_dissipated', []))
 
@@ -80,9 +81,9 @@ class MechanicsTab(QWidget):
         if len(stretch_w) > 0 and len(stretch_w) == len(stretch_t):
             self.curve_phase.setData(stretch_w, stretch_t)
 
-        # 2. Update Hysteresis Loop (Stress vs. Stretch W)
-        if len(stretch_w) > 0 and len(stretch_w) == len(true_stress):
-            self.curve_hysteresis.setData(stretch_w, true_stress)
+        # 2. Update Hysteresis Loop (Stress vs. Stretch L)
+        if len(stretch_l) > 0 and len(stretch_l) == len(true_stress):
+            self.curve_hysteresis.setData(stretch_l, true_stress)
 
         # 3. Update Energy Dissipation (Bar Graph)
         if len(energy_dissipated) > 0:

@@ -887,6 +887,7 @@ class DataPipeline(QObject):
         distance = self.data_trimmed['distance']
         cycle_flags = self.data_trimmed['cycle']
         time_s = self.data_trimmed['time_s']
+        distance = self.data_trimmed['distance']
 
         # Failsafe: Ensure arrays are perfectly aligned in length
         min_len = min(len(width), len(force_mN))
@@ -913,6 +914,7 @@ class DataPipeline(QObject):
         # Stretch Ratios (Lambda)
         stretch_w = width / W0
         stretch_t = thickness / T0
+        stretch_l = distance / distance[0]
 
         # Logarithmic (True) Strain (epsilon = ln(lambda))
         # This replaces the old (stretch - 1.0) engineering strain
@@ -971,10 +973,82 @@ class DataPipeline(QObject):
             'strain_t': true_strain_t.tolist(),
             'stretch_w': stretch_w.tolist(),
             'stretch_t': stretch_t.tolist(),
+            'stretch_l': stretch_l.tolist(),
             'poissons_ratio': poissons_ratio.tolist(),
             'energy_dissipated': energy_dissipated,
             'cycle_parsing': cycle_parsing
         }
 
+        self.true_stress = true_stress_kpa
+        self.stretch = stretch_l
         self.mechanics_available.emit(mechanics_payload)
         print("Biomechanics calculated and emitted!")
+
+    def generate_report(self):
+        """Prepares the trimmed data and calculated mechanics for CSV export."""
+        print("Gathering data for export...")
+
+        # 1. Ensure all necessary data exists
+        if getattr(self, 'data_trimmed', None) is None or self.data_trimmed.size == 0:
+            print("Cannot export: No trimmed data available.")
+            return
+
+        if getattr(self, 'true_stress', None) is None or getattr(self, 'stretch', None) is None:
+            print("Cannot export: Mechanics data not found. Run calculate_mechanics first.")
+            return
+
+        # 2. Safely handle array lengths
+        num_rows = min(len(self.data_trimmed), len(self.true_stress), len(self.stretch))
+
+        if num_rows == 0:
+            print("Cannot export: Data arrays are empty.")
+            return
+
+        # 3. Define the translation map for your headers
+        header_mapping = {
+            "time_s": "Time (s)",
+            "force": "Force (mN)",
+            "distance": "Distance (mm)",
+            "cycle": "Cycle Number"
+        }
+
+        report_data = {}
+
+        # 4. Grab columns from data_trimmed and apply mapped headers
+        for raw_col in self.data_trimmed.dtype.names:
+            # Use the mapped name if it exists, otherwise fallback to title-casing the raw name
+            friendly_name = header_mapping.get(raw_col, raw_col.replace("_", " ").title())
+            report_data[friendly_name] = self.data_trimmed[raw_col][:num_rows].tolist()
+
+        # 5. Add the calculated mechanics columns with readable headers
+        report_data["True Stress (kPa)"] = self.true_stress[:num_rows].tolist()
+        report_data["Stretch Ratio"] = self.stretch[:num_rows].tolist()
+
+        # 6. Pass to the CSV writer
+        self.write_csv_report(report_data, num_rows)
+
+
+    def write_csv_report(self, report_data: dict, num_rows: int):
+        """Handles the logic of writing the final report to a CSV file."""
+        filename = os.path.splitext(os.path.basename(self.video))[0].removesuffix("_video")
+        folder = os.path.dirname(self.video)
+        filepath = Path(f"{folder}/{filename}_results.csv")
+        filepath.parent.mkdir(parents=True, exist_ok=True)
+
+        # Handle existing files by incrementing a counter
+        i = 1
+        base_stem = filepath.stem
+        while filepath.exists():
+            i += 1
+            filepath = filepath.with_name(f"{base_stem}_{i}.csv")
+
+        header = ",".join(report_data.keys())
+        with open(filepath, 'w', newline='') as f:
+            f.write(header + '\n')
+            for i in range(num_rows):
+                row_values = [col[i] for col in report_data.values()]
+                row_values = [np.nan if not np.isfinite(val) else val for val in row_values]
+                formatted_row = [('' if np.isnan(val) else f'{val:.10g}') for val in row_values]
+                f.write(','.join(formatted_row) + '\n')
+        print(f"Report successfully written to {filepath}")
+        self.exported_file = filepath

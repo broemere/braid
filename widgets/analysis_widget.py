@@ -14,6 +14,7 @@ from tabs.seed_tab import SeedTab
 from tabs.thresh_tab import ThreshTab
 from tabs.geometry_tab import GeometryTab
 from tabs.mechanics_tab import MechanicsTab
+from tabs.export_tab import ExportTab
 
 
 log = logging.getLogger(__name__)
@@ -128,6 +129,9 @@ class AnalysisWidget(QWidget):
         self.analysis_tabs.addTab(self.geometry_tab, "📊 Geometry")
         self.mechanics_tab = MechanicsTab(self.pipeline)
         self.analysis_tabs.addTab(self.mechanics_tab, "🧮 Mechanics")
+        self.export_tab = ExportTab(self.pipeline)
+        self.analysis_tabs.addTab(self.export_tab, "📦 Export")
+
 
     def connect_signals(self):
         """Connects signals from widgets to the appropriate slots in this session."""
