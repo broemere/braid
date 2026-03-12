@@ -14,6 +14,7 @@ from tabs.seed_tab import SeedTab
 from tabs.thresh_tab import ThreshTab
 from tabs.geometry_tab import GeometryTab
 from tabs.mechanics_tab import MechanicsTab
+from tabs.relaxation_tab import RelaxationTab
 from tabs.export_tab import ExportTab
 
 
@@ -129,6 +130,8 @@ class AnalysisWidget(QWidget):
         self.analysis_tabs.addTab(self.geometry_tab, "📊 Geometry")
         self.mechanics_tab = MechanicsTab(self.pipeline)
         self.analysis_tabs.addTab(self.mechanics_tab, "🧮 Mechanics")
+        self.relaxation_tab = RelaxationTab(self.pipeline)
+        self.analysis_tabs.addTab(self.relaxation_tab, "⏳ Relaxation")
         self.export_tab = ExportTab(self.pipeline)
         self.analysis_tabs.addTab(self.export_tab, "📦 Export")
 

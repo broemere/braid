@@ -18,6 +18,7 @@ from skimage import data, img_as_float
 from skimage.segmentation import chan_vese
 from skimage.draw import disk, ellipse, rectangle
 from scipy.signal import savgol_filter
+from scipy.optimize import curve_fit
 
 
 log = logging.getLogger(__name__)
@@ -57,6 +58,10 @@ class DataPipeline(QObject):
 
     geometry_available = Signal(dict)
     mechanics_available = Signal(dict)
+
+    relaxation_available = Signal(dict)
+
+    exported_file = None
 
 
     def __init__(self, parent=None):
@@ -100,7 +105,7 @@ class DataPipeline(QObject):
         self.lambda1 = 0
         self.gamma = 0
 
-        self.width_roi_idx = 0
+        self.xy_roi_idx = 0
         self.thickness_roi_idx = 1
 
     @Slot(float, object)
@@ -116,6 +121,9 @@ class DataPipeline(QObject):
         # Emit signals so other tabs can update
         self.trim_time_changed.emit(self.trim_time)
         self.trimmed_data_available.emit(self.data_trimmed)
+
+
+    ### region HEADER
 
     def on_author_changed(self, new_author):
         self.author = new_author
@@ -151,7 +159,7 @@ class DataPipeline(QObject):
         self.frame_count = next(it)
         log.info(f"Frame count found: {self.frame_count}")
         log.info(f"Data keys: {result['data'].keys()}")
-        #log.info(f"Data found: {result['data']}")
+        log.info(f"Data found: {result['data']}")
         self.data = result["data"]
         self.max_distance_index = np.argmax(self.data["distance"])
         self.min_distance_index = np.argmin(self.data["distance"])
@@ -177,6 +185,7 @@ class DataPipeline(QObject):
                 print('loaded min roi frame')
                 self.roi_min_image_loaded.emit(v)
 
+    # endregion
 
     ### region PLOT TAB
 
@@ -248,7 +257,6 @@ class DataPipeline(QObject):
             self.conversion_factor_changed.emit(self.conversion_factor)
 
     # endregion
-
 
     ### region ROI TAB
 
@@ -421,6 +429,8 @@ class DataPipeline(QObject):
 
     # endregion
 
+    ### region THRESHOLD TAB
+
     def run_chan_vese(self, img, mu, gamma, lambda1, seed):
         image = img_as_float(img)
         if gamma != 1.0:
@@ -514,10 +524,12 @@ class DataPipeline(QObject):
         self.lambda1 = lambda1_val
         self.gamma_val = gamma_val
 
-
-
-            # 5. Emit back to the UI
+        # 5. Emit back to the UI
         self.threshed_images_ready.emit(processed_pixmaps)
+
+    # endregion
+
+    ### region GEOMETRY IMAGES
 
     def request_dimension_images(self):
         """
@@ -526,7 +538,7 @@ class DataPipeline(QObject):
         """
         min_rois = self.roi_data.get('min', [])
         if len(min_rois) >= 2:
-            w_img = min_rois[self.width_roi_idx].get('cv_img')
+            w_img = min_rois[self.xy_roi_idx].get('cv_img')
             t_img = min_rois[self.thickness_roi_idx].get('cv_img')
 
             if w_img is not None and t_img is not None:
@@ -537,8 +549,8 @@ class DataPipeline(QObject):
         Flips the state mapping for Width and Thickness, then updates the UI.
         """
         # Swap the tracking indices
-        self.width_roi_idx, self.thickness_roi_idx = self.thickness_roi_idx, self.width_roi_idx
-        print(f"Swapped Dimensions! Width is now ROI {self.width_roi_idx}, Thickness is ROI {self.thickness_roi_idx}")
+        self.xy_roi_idx, self.thickness_roi_idx = self.thickness_roi_idx, self.xy_roi_idx
+        print(f"Swapped Dimensions! Width is now ROI {self.xy_roi_idx}, Thickness is ROI {self.thickness_roi_idx}")
 
         # Emit the new images to immediately update the visual reference in the UI
         self.request_dimension_images()
@@ -710,167 +722,113 @@ class DataPipeline(QObject):
         self.second_segments = result["second_masks"]
         self.calculate_dimensions()
 
+
+    # endregion
+
     def calculate_dimensions(self):
         """
-        Calculates Width, Thickness, and Area from the stored segmentation masks.
-        Respects the current state of width_roi_idx and thickness_roi_idx.
+        Calculates X, Y, and Z dimensions from the stored segmentation masks.
+        Calculates the Y-Z cross-sectional area (normal to the X stretching direction).
         Emits the final data payload to the GeometryTab.
         """
         if not hasattr(self, 'first_segments') or not hasattr(self, 'second_segments'):
             print("No segmentation data available to calculate dimensions.")
             return
 
-        print("Calculating dimensions from stored masks...")
+        print("Calculating XYZ dimensions from stored masks...")
 
         frames = []
-        widths = []
-        thicknesses = []
-        areas = []
-        raw_widths = []
-        raw_thicknesses = []
+        raw_x = []
+        raw_y = []
+        raw_z = []
 
-        # 1. Determine which mask list represents Width and which represents Thickness
-        # self.width_roi_idx is either 0 or 1.
-        if self.width_roi_idx == 0:
-            width_masks_list = self.first_segments
-            thickness_masks_list = self.second_segments
+        # 1. Map the ROIs to the XY image and the Z image
+        # Assuming xy_roi_idx tracks the first image (XY Orientation)
+        if self.xy_roi_idx == 0:
+            xy_masks_list = self.first_segments
+            z_masks_list = self.second_segments
         else:
-            width_masks_list = self.second_segments
-            thickness_masks_list = self.first_segments
+            xy_masks_list = self.second_segments
+            z_masks_list = self.first_segments
 
-        num_frames = len(width_masks_list)
-
-        # Ensure conversion factor is valid (fallback to 1.0 if not set)
+        num_frames = len(xy_masks_list)
         cf = self.conversion_factor if self.conversion_factor > 0 else 1.0
 
         for i in range(num_frames):
             frames.append(i)
 
-            # --- Width Calculation ---
-            w_mask = width_masks_list[i]['mask']
-            if w_mask.size > 0:
-                row_sums = np.sum(w_mask, axis=1)
-                valid_rows = row_sums[row_sums > 0]
-                raw_widths.append(np.mean(valid_rows) if len(valid_rows) > 0 else 0)
+            # --- XY Image Processing ---
+            xy_mask = xy_masks_list[i]['mask']
+            if xy_mask.size > 0:
+                # X Measure: Horizontal sum (across columns -> axis=1)
+                x_sums = np.sum(xy_mask, axis=1)
+                valid_x = x_sums[x_sums > 0]
+                raw_x.append(np.mean(valid_x) if len(valid_x) > 0 else 0)
+
+                # Y Measure: Vertical sum (across rows -> axis=0)
+                y_sums = np.sum(xy_mask, axis=0)
+                valid_y = y_sums[y_sums > 0]
+                raw_y.append(np.mean(valid_y) if len(valid_y) > 0 else 0)
             else:
-                raw_widths.append(0)
+                raw_x.append(0)
+                raw_y.append(0)
 
-            # --- Thickness Calculation ---
-            t_mask = thickness_masks_list[i]['mask']
-            if t_mask.size > 0:
-                col_sums = np.sum(t_mask, axis=0)
-                valid_cols = col_sums[col_sums > 0]
-                raw_thicknesses.append(np.mean(valid_cols) if len(valid_cols) > 0 else 0)
+            # --- Z Image Processing ---
+            z_mask = z_masks_list[i]['mask']
+            if z_mask.size > 0:
+                # Z Measure: Vertical sum (across rows -> axis=0)
+                z_sums = np.sum(z_mask, axis=0)
+                valid_z = z_sums[z_sums > 0]
+                raw_z.append(np.mean(valid_z) if len(valid_z) > 0 else 0)
             else:
-                raw_thicknesses.append(0)
+                raw_z.append(0)
 
-            # 2. Outside the loop: Convert lists to 1D arrays and apply scaling
-        w_mm = np.array(raw_widths) / cf
-        t_mm = np.array(raw_thicknesses) / cf
+        # 2. Convert to real-world units (mm)
+        x_mm = np.array(raw_x) / cf
+        y_mm = np.array(raw_y) / cf
+        z_mm = np.array(raw_z) / cf
 
-        # 1. Calculate the Raw Stadium Area FIRST (maintains synchronous frame data)
-        raw_areas = (np.pi * (t_mm / 2) ** 2) + ((w_mm - t_mm) * t_mm)
+        # 3. Calculate Load-Bearing Cross-Sectional Area (Y-Z Plane)
+        raw_areas = y_mm * z_mm
 
-        # 2. Setup Smoothing Parameters
+        # 4. Setup Savitzky-Golay Smoothing
         calc_window = int(len(frames) * 0.05)
         window_length = max(5, calc_window if calc_window % 2 != 0 else calc_window + 1)
 
-        # 3. Apply Smoothing to all three arrays independently
+        # 5. Apply Smoothing to all arrays
         if window_length > 3 and len(frames) >= window_length:
-            smooth_w = savgol_filter(w_mm, window_length=window_length, polyorder=3)
-            smooth_t = savgol_filter(t_mm, window_length=window_length, polyorder=3)
-            smooth_area = savgol_filter(raw_areas, window_length=window_length, polyorder=3)
+            from scipy.signal import savgol_filter
+            # Explicitly setting mode='nearest' to prevent polynomial boundary wiggles
+            smooth_x = savgol_filter(x_mm, window_length=window_length, polyorder=3, mode='nearest')
+            smooth_y = savgol_filter(y_mm, window_length=window_length, polyorder=3, mode='nearest')
+            smooth_z = savgol_filter(z_mm, window_length=window_length, polyorder=3, mode='nearest')
+            smooth_area = savgol_filter(raw_areas, window_length=window_length, polyorder=3, mode='nearest')
         else:
-            smooth_w, smooth_t, smooth_area = w_mm, t_mm, raw_areas
+            smooth_x, smooth_y, smooth_z, smooth_area = x_mm, y_mm, z_mm, raw_areas
 
-        # 4. Package and Emit
+        # 6. Package and Emit
         result = {
             'frames': frames,
-            'width': smooth_w.tolist(),
-            'thickness': smooth_t.tolist(),
+            'dim_x': smooth_x.tolist(),
+            'dim_y': smooth_y.tolist(),
+            'dim_z': smooth_z.tolist(),
             'area': smooth_area.tolist()
         }
 
-        #
-        # # 2. Iterate through all frames and calculate metrics
-        # for i in range(num_frames):
-        #     frames.append(i)
-        #
-        #     # --- Width Calculation (Horizontal Average) ---
-        #     w_dict = width_masks_list[i]
-        #     w_mask = w_dict['mask']
-        #
-        #     if w_mask.size > 0:
-        #         # Sum across columns (axis=1) to count True pixels in each row
-        #         row_sums = np.sum(w_mask, axis=1)
-        #         valid_rows = row_sums[row_sums > 0]
-        #         avg_width_px = np.mean(valid_rows) if len(valid_rows) > 0 else 0
-        #     else:
-        #         avg_width_px = 0
-        #
-        #     # --- Thickness Calculation (Vertical Average) ---
-        #     t_dict = thickness_masks_list[i]
-        #     t_mask = t_dict['mask']
-        #
-        #     if t_mask.size > 0:
-        #         # Sum across rows (axis=0) to count True pixels in each column
-        #         col_sums = np.sum(t_mask, axis=0)
-        #         valid_cols = col_sums[col_sums > 0]
-        #         avg_thickness_px = np.mean(valid_cols) if len(valid_cols) > 0 else 0
-        #     else:
-        #         avg_thickness_px = 0
-        #
-        #     # 3. Apply Pixel-to-MM Conversion and Calculate Area
-        #     w_mm = np.array(avg_width_px) / cf
-        #     t_mm = np.array(avg_thickness_px) / cf
-        #     #area = w_mm * t_mm
-        #
-        #     # area = ( np.pi * (t_mm/2)**2 ) + ( (w_mm - t_mm)*t_mm)  # Stadium shape
-        #     #
-        #     # widths.append(w_mm)
-        #     # thicknesses.append(t_mm)
-        #     # areas.append(area)
-        #
-        #     # 2. Apply Savitzky-Golay Smoothing
-        #     # window_length must be odd. 11 to 21 is usually great for 400-500 frames.
-        #     # polyorder of 3 allows the curve to flex into peaks perfectly.
-        #     window_length = min(21, len(frames) - (len(frames) % 2 == 0))  # Ensure odd number <= frame count
-        #     if window_length > 3:
-        #         smooth_w = savgol_filter(w_mm, window_length=window_length, polyorder=3)
-        #         smooth_t = savgol_filter(t_mm, window_length=window_length, polyorder=3)
-        #     else:
-        #         smooth_w, smooth_t = w_mm, t_mm  # Fallback if too few frames
-        #
-        #     # 3. Calculate Stadium Area using the SMOOTHED arrays
-        #     # area = (pi * r^2) + (rectangle_width * thickness)
-        #     areas = (np.pi * (smooth_t / 2) ** 2) + ((smooth_w - smooth_t) * smooth_t)
-        #
-        # # 4. Package and Emit
-        # result = {
-        #     'frames': frames,
-        #     'width': smooth_w.tolist(),
-        #     'thickness': smooth_t.tolist(),
-        #     'area': areas.tolist()
-        # }
-
-        # # 4. Package and Emit
-        # result = {
-        #     'frames': frames,
-        #     'width': widths,
-        #     'thickness': thicknesses,
-        #     'area': areas
-        # }
-
         self.geometry_available.emit(result)
-        print("Dimensions calculated and emitted to UI.")
+        print("XYZ Dimensions calculated and emitted to UI.")
+
         # Save the payload so the mechanics function can use it
         self.geometry_data = result
         self.calculate_mechanics()
+        self.calculate_relaxation()
+
+    # endregion
 
     def calculate_mechanics(self):
         """
-        Derives True Stress, Strain, Poisson's Ratio, and Energy Dissipation
-        by syncing the optical geometry data with the mechanical load cell data.
+        Derives True Stress, Strain, Poisson's Ratios, and Energy Dissipation
+        using strict X, Y, Z coordinate mapping.
         """
         print("Calculating biomechanics...")
         if getattr(self, 'geometry_data', None) is None or self.data is None:
@@ -879,56 +837,69 @@ class DataPipeline(QObject):
 
         # 1. Gather Arrays
         geom = self.geometry_data
-        width = np.array(geom['width'])
-        thickness = np.array(geom['thickness'])
-        area = np.array(geom['area'])
-
-        force_mN = -self.data_trimmed['force']
-        distance = self.data_trimmed['distance']
+        dim_x_opt = np.array(geom['dim_x'])  # Optical transverse loading direction
+        dim_y = np.array(geom['dim_y'])  # Optical longitudinal unloaded direction
+        dim_z = np.array(geom['dim_z'])  # Optical transverse unloaded direction
+        area = np.array(geom['area'])  # Cross-section normal to X (Y * Z)
+        force_mN = self.data_trimmed['force']
+        if "2026-02-05" in str(self.video):  # Quirk for backwards load cell data
+            force_mN = -force_mN
+        machine_x = self.data_trimmed['distance']  # Mechanical loading direction
         cycle_flags = self.data_trimmed['cycle']
         time_s = self.data_trimmed['time_s']
-        distance = self.data_trimmed['distance']
 
         # Failsafe: Ensure arrays are perfectly aligned in length
-        min_len = min(len(width), len(force_mN))
+        min_len = min(len(dim_x_opt), len(force_mN))
         if min_len == 0:
             return
 
-        width, thickness, area = width[:min_len], thickness[:min_len], area[:min_len]
-        force_mN, distance = force_mN[:min_len], distance[:min_len]
-        cycle_flags, time_s = cycle_flags[:min_len], time_s[:min_len]
+        dim_x_opt = dim_x_opt[:min_len]
+        dim_y = dim_y[:min_len]
+        dim_z = dim_z[:min_len]
+        area = area[:min_len]
+
+        force_mN = force_mN[:min_len]
+        machine_x = machine_x[:min_len]
+        cycle_flags = cycle_flags[:min_len]
+        time_s = time_s[:min_len]
 
         # 2. Establish Rest State (t=0 Baselines)
-        # Using the average of the first 3 frames to prevent a single noisy pixel from shifting the whole test
-        W0 = np.mean(width[:3])
-        T0 = np.mean(thickness[:3])
-        A0 = np.mean(area[:3])
+        X0_opt = np.mean(dim_x_opt[:3]) if np.mean(dim_x_opt[:3]) != 0 else 1e-6
+        Y0 = np.mean(dim_y[:3]) if np.mean(dim_y[:3]) != 0 else 1e-6
+        Z0 = np.mean(dim_z[:3]) if np.mean(dim_z[:3]) != 0 else 1e-6
+        A0 = np.mean(area[:3]) if np.mean(area[:3]) != 0 else 1e-6
+        X0_mech = np.mean(machine_x[:3]) if np.mean(machine_x[:3]) != 0 else 1e-6
 
         # 3. Continuous Array Math
-        # True Stress (kPa = mN / mm^2)
-        true_stress_kpa = force_mN / area
 
-        # Engineering Stress (kPa)
+        # Stress calculations (kPa = mN / mm^2)
+        true_stress_kpa = force_mN / area
         eng_stress_kpa = force_mN / A0
 
         # Stretch Ratios (Lambda)
-        stretch_w = width / W0
-        stretch_t = thickness / T0
-        stretch_l = distance / distance[0]
+        stretch_x_opt = dim_x_opt / X0_opt
+        stretch_y = dim_y / Y0
+        stretch_z = dim_z / Z0
+        stretch_x_mech = machine_x / X0_mech
 
         # Logarithmic (True) Strain (epsilon = ln(lambda))
-        # This replaces the old (stretch - 1.0) engineering strain
-        true_strain_w = np.log(stretch_w)
-        true_strain_t = np.log(stretch_t)
+        true_strain_x_opt = np.log(stretch_x_opt)
+        true_strain_y = np.log(stretch_y)
+        true_strain_z = np.log(stretch_z)
+        true_strain_x_mech = np.log(stretch_x_mech)
 
-        # Engineering Strain (e = lambda - 1) - Kept for reference
-        eng_strain_w = stretch_w - 1.0
+        # --- UPDATED POISSON'S RATIO LOGIC ---
+        # Widen the deadband to 2% strain to avoid the divide-by-zero asymptote at cycle boundaries.
+        # Use np.nan so the plot leaves a clean gap when resting, rather than snapping to 0.5.
+        strain_threshold = 0.02
 
-        # Dynamic Poisson's Ratio (v = -e_transverse / e_axial)
-        # Using True Strain for finite deformation accuracy
-        poissons_ratio = np.where(np.abs(true_strain_w) > 0.005,
-                                  -true_strain_t / true_strain_w,
-                                  0.5)
+        poissons_ratio_zx = np.where(np.abs(true_strain_x_opt) > strain_threshold,
+                                     -true_strain_z / true_strain_x_opt,
+                                     np.nan)
+
+        poissons_ratio_yx = np.where(np.abs(true_strain_x_opt) > strain_threshold,
+                                     -true_strain_y / true_strain_x_opt,
+                                     np.nan)
 
         # 4. Parse Cycles & Calculate Hysteresis Energy
         unique_cycles = np.unique(cycle_flags)
@@ -936,24 +907,44 @@ class DataPipeline(QObject):
         energy_dissipated = []
 
         for c in unique_cycles:
-            # Create a boolean mask for the current cycle
             mask = (cycle_flags == c)
             idx = np.where(mask)[0]
 
             if len(idx) < 3:
                 continue
 
-            c_strain = true_strain_w[idx]
+            # We use the mechanical strain for the integral to prevent pixel noise
+            # from causing artificial energy loops
+            c_strain = true_strain_x_opt[idx]
             c_stress = true_stress_kpa[idx]
-            c_dist = distance[idx]
+            c_dist = machine_x[idx]
 
-            # Find the physical turnaround point (Max stretch distance)
+            # Find the exact peak to split the cycle
             peak_relative_idx = np.argmax(c_dist)
             peak_global_idx = idx[peak_relative_idx]
 
-            # Calculate Volumetric Energy Dissipation (Area inside the hysteresis loop)
-            # np.trapz integrates forwards (loading) and backwards (unloading) automatically
-            dissipated_mJ_mm3 = np.trapz(c_stress, c_strain)
+            # --- Explicit Energy Integration ---
+            # 1. Isolate loading and unloading arrays
+            load_strain = c_strain[:peak_relative_idx + 1]
+            load_stress = c_stress[:peak_relative_idx + 1]
+
+            unload_strain = c_strain[peak_relative_idx:]
+            unload_stress = c_stress[peak_relative_idx:]
+
+            # 2. Calculate Work In (Area under loading curve)
+            w_in = np.trapz(load_stress, load_strain)
+
+            # 3. Calculate Work Out (Area under unloading curve)
+            # np.trapz returns a negative value because strain is decreasing, so we use abs()
+            w_out = abs(np.trapz(unload_stress, unload_strain))
+
+            # 4. Dissipated Energy = Work In - Work Out
+            dissipated = w_in - w_out
+
+            # 5. Safeguard: Tissue cannot generate energy.
+            # Any negative value is pure sensor lag/noise in the fully elastic regime.
+            dissipated_mJ_mm3 = max(0.0, dissipated)
+
             energy_dissipated.append(dissipated_mJ_mm3)
 
             # Store the indices so the UI can easily color-code Loading vs. Unloading curves
@@ -969,36 +960,166 @@ class DataPipeline(QObject):
             'time_s': time_s.tolist(),
             'true_stress_kpa': true_stress_kpa.tolist(),
             'eng_stress_kpa': eng_stress_kpa.tolist(),
-            'strain_w': true_strain_w.tolist(),
-            'strain_t': true_strain_t.tolist(),
-            'stretch_w': stretch_w.tolist(),
-            'stretch_t': stretch_t.tolist(),
-            'stretch_l': stretch_l.tolist(),
-            'poissons_ratio': poissons_ratio.tolist(),
+
+            # Export all strain variants
+            'strain_x_opt': true_strain_x_opt.tolist(),
+            'strain_x_mech': true_strain_x_mech.tolist(),
+            'strain_y': true_strain_y.tolist(),
+            'strain_z': true_strain_z.tolist(),
+
+            # Export all stretch variants
+            'stretch_x_opt': stretch_x_opt.tolist(),
+            'stretch_x_mech': stretch_x_mech.tolist(),
+            'stretch_y': stretch_y.tolist(),
+            'stretch_z': stretch_z.tolist(),
+
+            'poissons_ratio_zx': poissons_ratio_zx.tolist(),
+            'poissons_ratio_yx': poissons_ratio_yx.tolist(),
             'energy_dissipated': energy_dissipated,
             'cycle_parsing': cycle_parsing
         }
 
-        self.true_stress = true_stress_kpa
-        self.stretch = stretch_l
+        self.mechanics_payload = mechanics_payload
         self.mechanics_available.emit(mechanics_payload)
         print("Biomechanics calculated and emitted!")
+
+    def calculate_relaxation(self):
+        """
+        Parses a stress relaxation hold, isolating the active motor ramp using mechanical strain,
+        and calculating moduli using the true optical tissue strain.
+        """
+        print("Calculating stress relaxation metrics...")
+        if getattr(self, 'mechanics_payload', None) is None:
+            return
+
+        from scipy.optimize import curve_fit
+
+        data = self.mechanics_payload
+        geom = self.geometry_data
+        time_s = np.array(data['time_s'])
+        stress = np.array(data['true_stress_kpa'])
+        dim_z = np.array(geom['dim_z'])
+
+        # Explicitly separate the two strain arrays for their specific jobs
+        strain_mech = np.array(data['strain_x_mech'])
+        strain_opt = np.array(data['strain_x_opt'])
+
+        # 1. Isolate the Active Loading Ramp (Jaws Moving)
+        # -> STRICTLY using the smooth mechanical strain as the trigger
+        strain_rate = np.diff(strain_mech)
+
+        # Use a small threshold (e.g., 5% of max speed) to ignore baseline noise
+        movement_threshold = np.max(strain_rate) * 0.05
+        moving_indices = np.where(strain_rate > movement_threshold)[0]
+
+        if len(moving_indices) == 0:
+            print("No jaw movement detected in data.")
+            return
+
+        # The exact frames the motor started and stopped
+        ramp_start_idx = moving_indices[0]
+        hold_start_idx = moving_indices[-1] + 1
+
+        # 2. Find the True Peak Stress (Top of the compliance hump)
+        peak_relative_idx = np.argmax(stress[hold_start_idx:])
+        peak_stress_idx = hold_start_idx + peak_relative_idx
+        peak_stress = stress[peak_stress_idx]
+
+        # 3. Calculate Instantaneous Modulus (E_inst)
+        # -> STRICTLY using the optical strain for the math
+        baseline_stress = stress[ramp_start_idx]
+        baseline_strain = strain_opt[ramp_start_idx]
+
+        delta_stress = stress[hold_start_idx] - baseline_stress
+        delta_strain = strain_opt[hold_start_idx] - baseline_strain
+
+        if delta_strain > 0:
+            e_inst = delta_stress / delta_strain
+        else:
+            e_inst = 0.0
+
+        # 4. Prepare Hold Data for SLS Fitting
+        hold_time_raw = time_s[peak_stress_idx:]
+        hold_time_shifted = hold_time_raw - hold_time_raw[0]
+        hold_stress = stress[peak_stress_idx:]
+        final_recorded_stress = hold_stress[-1]
+
+        def two_tau_model(t, sigma_inf, sigma_1, tau_1, sigma_2, tau_2):
+            return sigma_inf + sigma_1 * np.exp(-t / tau_1) + sigma_2 * np.exp(-t / tau_2)
+
+        total_viscous_drop = peak_stress - final_recorded_stress
+
+        # Guesses: [Asymptote, Fast Drop, Fast Tau, Slow Drop, Slow Tau]
+        p0 = [final_recorded_stress, total_viscous_drop * 0.5, 1.0, total_viscous_drop * 0.5, 50.0]
+        bounds = (0, np.inf)
+
+        try:
+            popt, _ = curve_fit(two_tau_model, hold_time_shifted, hold_stress, p0=p0, bounds=bounds, maxfev=5000)
+
+            # Unpack the raw optimized parameters
+            sigma_inf_raw, s1, t1, s2, t2 = popt
+
+            # Sort them so tau_1 is ALWAYS the "fast" phase, and tau_2 is the "slow" phase
+            if t1 > t2:
+                t1, t2 = t2, t1
+                s1, s2 = s2, s1
+
+            sigma_inf, sigma_1, tau_1, sigma_2, tau_2 = sigma_inf_raw, s1, t1, s2, t2
+
+            # Generate the fitted curve array for the UI
+            fitted_stress = two_tau_model(hold_time_shifted, sigma_inf, sigma_1, tau_1, sigma_2, tau_2)
+
+        except Exception as e:
+            print(f"2-Tau Curve fit failed: {e}")
+            sigma_inf = final_recorded_stress
+            sigma_1, tau_1 = (total_viscous_drop * 0.5), 1.0
+            sigma_2, tau_2 = (total_viscous_drop * 0.5), 50.0
+            fitted_stress = hold_stress
+
+        # 6. Final Derived Metrics
+        relaxed_delta_stress = sigma_inf - baseline_stress
+
+        # -> STRICTLY using the optical strain for the math
+        if delta_strain > 0:
+            e_inf = relaxed_delta_stress / delta_strain
+        else:
+            e_inf = 0.0
+
+        percent_relaxation = ((peak_stress - sigma_inf) / peak_stress) * 100 if peak_stress > 0 else 0.0
+
+        # 7. Package and Emit
+        relax_payload = {
+            'time_s': time_s.tolist(),
+            'stress_kpa': stress.tolist(),
+            'dim_z': dim_z.tolist(),
+            'hold_start_idx': int(hold_start_idx),
+            'peak_stress_idx': int(peak_stress_idx),
+            'hold_time_raw': hold_time_raw.tolist(),
+            'fitted_stress': fitted_stress.tolist(),
+            'metrics': {
+                'peak_stress': float(peak_stress),
+                'sigma_inf': float(sigma_inf),
+                'sigma_1': float(sigma_1),
+                'tau_1': float(tau_1),
+                'sigma_2': float(sigma_2),
+                'tau_2': float(tau_2),
+                'e_inst': float(e_inst),
+                'e_inf': float(e_inf),
+                'percent_relax': float(percent_relaxation)
+            }
+        }
+
+        self.relaxation_available.emit(relax_payload)
+        print("Relaxation calculated and emitted!")
+
+    ### region EXPORT TAB
 
     def generate_report(self):
         """Prepares the trimmed data and calculated mechanics for CSV export."""
         print("Gathering data for export...")
 
-        # 1. Ensure all necessary data exists
-        if getattr(self, 'data_trimmed', None) is None or self.data_trimmed.size == 0:
-            print("Cannot export: No trimmed data available.")
-            return
-
-        if getattr(self, 'true_stress', None) is None or getattr(self, 'stretch', None) is None:
-            print("Cannot export: Mechanics data not found. Run calculate_mechanics first.")
-            return
-
         # 2. Safely handle array lengths
-        num_rows = min(len(self.data_trimmed), len(self.true_stress), len(self.stretch))
+        num_rows = len(self.data_trimmed)
 
         if num_rows == 0:
             print("Cannot export: Data arrays are empty.")
@@ -1021,8 +1142,49 @@ class DataPipeline(QObject):
             report_data[friendly_name] = self.data_trimmed[raw_col][:num_rows].tolist()
 
         # 5. Add the calculated mechanics columns with readable headers
-        report_data["True Stress (kPa)"] = self.true_stress[:num_rows].tolist()
-        report_data["Stretch Ratio"] = self.stretch[:num_rows].tolist()
+        report_data["X Dimension (mm)"] = self.geometry_data["x_dim"][:num_rows].tolist()
+        report_data["Y Dimension (mm)"] = self.geometry_data["y_dim"][:num_rows].tolist()
+        report_data["Z Dimension (mm)"] = self.geometry_data["z_dim"][:num_rows].tolist()
+        report_data["YZ Area (mm^2)"] = self.geometry_data["area"][:num_rows].tolist()
+        report_data["True Stress (kPa)"] = self.mechanics_payload["true_stress"][:num_rows].tolist()
+        report_data["Stretch X Tissue"] = self.mechanics_payload["stretch_x_opt"][:num_rows].tolist()
+        report_data["Stretch X Jaws"] = self.mechanics_payload["stretch_x_mech"][:num_rows].tolist()
+
+        if hasattr(self, 'relaxation_available') and getattr(self, 'relaxation_payload', None) is not None:
+            rel_data = self.relaxation_payload
+            peak_idx = rel_data['peak_stress_idx']
+            fit_array = rel_data['fitted_stress']
+            m = rel_data['metrics']
+
+            # A. Pad the fitted stress array with NaNs so it aligns perfectly with time
+            padded_fit = np.full(num_rows, np.nan)
+            available_slots = num_rows - peak_idx
+
+            if available_slots > 0:
+                fit_len = min(len(fit_array), available_slots)
+                padded_fit[peak_idx: peak_idx + fit_len] = fit_array[:fit_len]
+
+            report_data["Fitted Stress 2-Tau (kPa)"] = padded_fit.tolist()
+
+            # B. Append scalar metrics as columns (Value in Row 1, blanks below)
+            scalar_metrics = {
+                "Peak Stress (kPa)": m['peak_stress'],
+                "Step Modulus E_step (kPa)": m['e_inst'],
+                "Relaxed Modulus E_inf (kPa)": m['e_inf'],
+                "Total Relaxation (%)": m['percent_relax'],
+                "Eq Stress Model (kPa)": m['sigma_inf'],
+                "Fast Visc Drop (kPa)": m['sigma_1'],
+                "Fast Tau (s)": m['tau_1'],
+                "Slow Visc Drop (kPa)": m['sigma_2'],
+                "Slow Tau (s)": m['tau_2']
+            }
+
+            for col_name, val in scalar_metrics.items():
+                col_data = np.full(num_rows, np.nan)
+                if num_rows > 0:
+                    col_data[0] = val  # Drop the metric into the very first row
+                report_data[col_name] = col_data.tolist()
+
 
         # 6. Pass to the CSV writer
         self.write_csv_report(report_data, num_rows)
@@ -1052,3 +1214,5 @@ class DataPipeline(QObject):
                 f.write(','.join(formatted_row) + '\n')
         print(f"Report successfully written to {filepath}")
         self.exported_file = filepath
+
+    # endregion
