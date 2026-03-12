@@ -9,6 +9,7 @@ from skimage import img_as_float
 from skimage.segmentation import chan_vese
 from skimage.draw import rectangle, ellipse
 from PySide6.QtCore import QRect
+from processing.resource_loader import resource_path
 
 log = logging.getLogger(__name__)
 
@@ -23,9 +24,9 @@ def get_system_username():
 
 
 def load_colors():
-    with open("resources/colors.json", 'r') as f:
-        colors = json.load(f)
-    return colors
+    path = resource_path("resources/colors.json")
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
 
 
 def frame_loader(signals, file_path, frame_indices, count=False):
