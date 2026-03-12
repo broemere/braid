@@ -1110,6 +1110,7 @@ class DataPipeline(QObject):
         }
 
         self.relaxation_available.emit(relax_payload)
+        self.relaxation_payload = relax_payload
         print("Relaxation calculated and emitted!")
 
     ### region EXPORT TAB
@@ -1150,7 +1151,7 @@ class DataPipeline(QObject):
         report_data["Stretch X Tissue"] = self.mechanics_payload["stretch_x_opt"][:num_rows]
         report_data["Stretch X Jaws"] = self.mechanics_payload["stretch_x_mech"][:num_rows]
 
-        if hasattr(self, 'relaxation_available') and getattr(self, 'relaxation_payload', None) is not None:
+        if getattr(self, 'relaxation_payload', None) is not None:
             rel_data = self.relaxation_payload
             peak_idx = rel_data['peak_stress_idx']
             fit_array = rel_data['fitted_stress']
