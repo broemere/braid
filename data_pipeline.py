@@ -1142,13 +1142,13 @@ class DataPipeline(QObject):
             report_data[friendly_name] = self.data_trimmed[raw_col][:num_rows].tolist()
 
         # 5. Add the calculated mechanics columns with readable headers
-        report_data["X Dimension (mm)"] = self.geometry_data["x_dim"][:num_rows].tolist()
-        report_data["Y Dimension (mm)"] = self.geometry_data["y_dim"][:num_rows].tolist()
-        report_data["Z Dimension (mm)"] = self.geometry_data["z_dim"][:num_rows].tolist()
-        report_data["YZ Area (mm^2)"] = self.geometry_data["area"][:num_rows].tolist()
-        report_data["True Stress (kPa)"] = self.mechanics_payload["true_stress"][:num_rows].tolist()
-        report_data["Stretch X Tissue"] = self.mechanics_payload["stretch_x_opt"][:num_rows].tolist()
-        report_data["Stretch X Jaws"] = self.mechanics_payload["stretch_x_mech"][:num_rows].tolist()
+        report_data["X Dimension (mm)"] = self.geometry_data["dim_x"][:num_rows]
+        report_data["Y Dimension (mm)"] = self.geometry_data["dim_y"][:num_rows]
+        report_data["Z Dimension (mm)"] = self.geometry_data["dim_z"][:num_rows]
+        report_data["YZ Area (mm^2)"] = self.geometry_data["area"][:num_rows]
+        report_data["True Stress (kPa)"] = self.mechanics_payload["true_stress_kpa"][:num_rows]
+        report_data["Stretch X Tissue"] = self.mechanics_payload["stretch_x_opt"][:num_rows]
+        report_data["Stretch X Jaws"] = self.mechanics_payload["stretch_x_mech"][:num_rows]
 
         if hasattr(self, 'relaxation_available') and getattr(self, 'relaxation_payload', None) is not None:
             rel_data = self.relaxation_payload

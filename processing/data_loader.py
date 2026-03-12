@@ -23,7 +23,7 @@ def get_system_username():
 
 
 def load_colors():
-    with open("widgets/colors.json", 'r') as f:
+    with open("resources/colors.json", 'r') as f:
         colors = json.load(f)
     return colors
 
