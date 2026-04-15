@@ -10,8 +10,12 @@ from skimage.segmentation import chan_vese
 from skimage.draw import rectangle, ellipse
 from PySide6.QtCore import QRect
 from processing.resource_loader import resource_path
+import concurrent.futures
+import multiprocessing
 
 log = logging.getLogger(__name__)
+
+KERNEL = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
 
 
 def get_system_username():
@@ -193,11 +197,161 @@ def _interpolate_rois_worker(roi_data: dict, pct: float) -> list[dict]:
     return interpolated_rois
 
 
+# def geometry_worker(signals, config: dict):
+#     """
+#     The heavy-lifting background task.
+#     Reads the TIFF file, applies Chan-Vese, and calculates dimensional math.
+#     """
+#     file_path = config['file_path']
+#     distances = config['distances']
+#     min_dist = config['min_dist']
+#     max_dist = config['max_dist']
+#     roi_data = config['roi_data']
+#
+#     mu = config['mu']
+#     gamma = config['gamma']
+#     lambda1 = config['lambda1']
+#
+#     frames_out = []
+#     width_masks_out, thickness_masks_out = [], []
+#
+#     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+#
+#     try:
+#         with TiffFile(file_path) as tif:
+#             total_frames = len(distances)
+#             signals.message.emit("Calculating Geometry over all frames...")
+#
+#             for i, distance in enumerate(distances):
+#                 # 1. Calculate percentage and clamp it mathematically
+#                 pct = (distance - min_dist) / (max_dist - min_dist)
+#                 pct = np.clip(pct, 0.0, 1.0)
+#
+#                 # 2. Get interpolated boxes and seeds
+#                 interp_rois = _interpolate_rois_worker(roi_data, pct)
+#
+#                 # 3. Extract Image Data
+#                 frame = tif.pages[i].asarray()
+#                 if frame.ndim == 3:
+#                     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+#                 else:
+#                     gray = frame.copy()
+#
+#                 # if i % 10 == 0:  # Only log every 10th frame so we don't spam the console  # Debugging
+#                 #     log.info(f"--- FRAME {i} | Type {gray.dtype} ---")
+#                 #     log.info(f"1. Frame min: {gray.min()}")
+#                 #     log.info(f"1. Frame max: {gray.max()}")
+#
+#                 cv2.normalize(gray, gray, 0, 255, cv2.NORM_MINMAX)
+#                 gray = gray.astype(np.uint8)
+#
+#                 dimensions = []  # Will hold [width_px, length_px]
+#
+#                 # 4. Process both ROIs (0 = Width, 1 = Length)
+#                 for roi_idx, roi in enumerate(interp_rois):
+#                     # Crop
+#                     r = roi['roi_rect']
+#                     crop = gray[r.y(): r.y() + r.height(), r.x(): r.x() + r.width()]
+#
+#                     if crop.size == 0:
+#                         dimensions.append(0)
+#                         # Ensure we append empty masks to maintain index parity
+#                         empty_mask = {'mask': np.array([], dtype=bool), 'offset_x': 0, 'offset_y': 0}
+#                         if roi_idx == 0:
+#                             width_masks_out.append(empty_mask)
+#                         else:
+#                             thickness_masks_out.append(empty_mask)
+#                         continue
+#
+#                     # Generate Seed Mask
+#                     mask_shape = crop.shape
+#                     seed_mask = np.zeros(mask_shape, dtype=bool)
+#                     coords = roi['seed_coords']
+#
+#                     if roi['seed_shape_type'] == 'rect':
+#                         start = (coords['y'], coords['x'])
+#                         end = (coords['y'] + coords['h'], coords['x'] + coords['w'])
+#                         rr, cc = rectangle(start=start, end=end, shape=mask_shape)
+#                         seed_mask[rr, cc] = True
+#                     elif roi['seed_shape_type'] == 'ellipse':
+#                         rr, cc = ellipse(coords['center_y'], coords['center_x'],
+#                                          coords['radius_y'], coords['radius_x'], shape=mask_shape)
+#                         seed_mask[rr, cc] = True
+#
+#                     # Run Chan-Vese
+#                     img_float = img_as_float(crop)
+#                     if gamma != 1.0:
+#                         img_float = img_float ** gamma
+#
+#                     cv_result = chan_vese(img_float, mu=mu, lambda1=lambda1, lambda2=1.0,
+#                                           tol=1e-3, max_num_iter=100, dt=0.5,
+#                                           init_level_set=seed_mask, extended_output=True)  # Ensure tuple output
+#
+#                     # Convert to binary mask (0 or 1)
+#                     final_mask = cv_result[0].astype(np.uint8)
+#
+#                     # Optional Morphology cleanup (ensure mask is 0/255 for cv2)
+#                     cleaned_mask = cv2.morphologyEx(final_mask * 255, cv2.MORPH_OPEN, kernel)
+#                     binary_mask = cleaned_mask // 255
+#
+#                     # if i % 10 == 0:  # Only log every 10th frame so we don't spam the console  ## Debugging
+#                     #     log.info(f"--- FRAME {i} | ROI {roi_idx} ---")
+#                     #     log.info(f"1. Crop Shape: {crop.shape}")
+#                     #     log.info(f"2. Seed Pixels: {np.sum(seed_mask)}")
+#                     #     log.info(f"3. Chan-Vese Pixels: {np.sum(final_mask)}")
+#                     #     log.info(f"4. Cleaned Pixels: {np.sum(binary_mask)}")
+#
+#                     # --- MASK CROPPING & STORAGE ---
+#                     # Find coordinates of all non-zero pixels
+#                     y_idx, x_idx = np.nonzero(binary_mask)
+#
+#                     if len(y_idx) > 0:
+#                         # Get bounding box of the active mask
+#                         min_y, max_y = y_idx.min(), y_idx.max()
+#                         min_x, max_x = x_idx.min(), x_idx.max()
+#
+#                         # Slice the array and cast to boolean (1 byte per pixel)
+#                         tight_mask = binary_mask[min_y:max_y + 1, min_x:max_x + 1].astype(bool)
+#                         mask_data = {
+#                             'mask': tight_mask,
+#                             'offset_x': int(min_x),
+#                             'offset_y': int(min_y)
+#                         }
+#                     else:
+#                         mask_data = {
+#                             'mask': np.array([], dtype=bool),
+#                             'offset_x': 0,
+#                             'offset_y': 0
+#                         }
+#                         # -------------------------------
+#
+#                     # Simply store the masks based on the ROI index
+#                     if roi_idx == 0:
+#                         width_masks_out.append(mask_data)
+#                     else:
+#                         thickness_masks_out.append(mask_data)
+#
+#                     # Both ROIs for this frame are processed. Log the frame index.
+#                 frames_out.append(i)
+#
+#                 # Update Progress
+#                 progress_pct = int(((i + 1) / total_frames) * 100)
+#                 signals.progress.emit(progress_pct)
+#
+#             signals.message.emit("Geometry calculation complete.")
+#
+#             # Return only the frames and the raw segmentation masks
+#             return {
+#                 #'idx': frames_out,
+#                 'first_masks': width_masks_out,
+#                 'second_masks': thickness_masks_out
+#             }
+#
+#     except Exception as e:
+#         signals.message.emit(f"Error calculating geometry: {str(e)}")
+#         raise e
+
 def geometry_worker(signals, config: dict):
-    """
-    The heavy-lifting background task.
-    Reads the TIFF file, applies Chan-Vese, and calculates dimensional math.
-    """
     file_path = config['file_path']
     distances = config['distances']
     min_dist = config['min_dist']
@@ -211,13 +365,23 @@ def geometry_worker(signals, config: dict):
     frames_out = []
     width_masks_out, thickness_masks_out = [], []
 
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+    # Get optimal core count (leave one or two for the OS/GUI)
+    max_workers = max(1, multiprocessing.cpu_count() - 2)
 
-    try:
-        with TiffFile(file_path) as tif:
-            total_frames = len(distances)
-            signals.message.emit("Calculating Geometry over all frames...")
+    # We will store results in dictionaries since futures complete out of order
+    width_results = {}
+    thickness_results = {}
 
+    with TiffFile(file_path) as tif:
+        total_frames = len(distances)
+
+        # Start the multiprocessing pool
+        with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
+            futures = []
+
+            signals.message.emit("Reading image data and queuing tasks...")
+
+            # --- PRODUCER LOOP ---
             for i, distance in enumerate(distances):
                 # 1. Calculate percentage and clamp it mathematically
                 pct = (distance - min_dist) / (max_dist - min_dist)
@@ -226,29 +390,22 @@ def geometry_worker(signals, config: dict):
                 # 2. Get interpolated boxes and seeds
                 interp_rois = _interpolate_rois_worker(roi_data, pct)
 
-                # 3. Extract Image Data
                 frame = tif.pages[i].asarray()
                 if frame.ndim == 3:
                     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                 else:
                     gray = frame.copy()
 
-                # if i % 10 == 0:  # Only log every 10th frame so we don't spam the console  # Debugging
-                #     log.info(f"--- FRAME {i} | Type {gray.dtype} ---")
-                #     log.info(f"1. Frame min: {gray.min()}")
-                #     log.info(f"1. Frame max: {gray.max()}")
-
                 cv2.normalize(gray, gray, 0, 255, cv2.NORM_MINMAX)
                 gray = gray.astype(np.uint8)
-
                 dimensions = []  # Will hold [width_px, length_px]
 
-                # 4. Process both ROIs (0 = Width, 1 = Length)
                 for roi_idx, roi in enumerate(interp_rois):
-                    # Crop
+                    # 1. CROP THE IMAGE HERE (In the Manager)
                     r = roi['roi_rect']
                     crop = gray[r.y(): r.y() + r.height(), r.x(): r.x() + r.width()]
 
+                    # 2. GENERATE SEED MASK HERE
                     if crop.size == 0:
                         dimensions.append(0)
                         # Ensure we append empty masks to maintain index parity
@@ -274,75 +431,120 @@ def geometry_worker(signals, config: dict):
                                          coords['radius_y'], coords['radius_x'], shape=mask_shape)
                         seed_mask[rr, cc] = True
 
-                    # Run Chan-Vese
-                    img_float = img_as_float(crop)
-                    if gamma != 1.0:
-                        img_float = img_float ** gamma
+                    # 3. PACKAGE THE TINY PAYLOAD
+                    payload = {
+                        'crop': crop,
+                        'seed_mask': seed_mask,
+                        'mu': mu, 'gamma': gamma, 'lambda1': lambda1,
+                        'frame_idx': i,
+                        'roi_idx': roi_idx
+                    }
 
-                    cv_result = chan_vese(img_float, mu=mu, lambda1=lambda1, lambda2=1.0,
-                                          tol=1e-3, max_num_iter=100, dt=0.5,
-                                          init_level_set=seed_mask, extended_output=True)  # Ensure tuple output
+                    # 4. SUBMIT TO WORKER POOL
+                    future = executor.submit(compute_chan_vese_worker, payload)
+                    futures.append(future)
 
-                    # Convert to binary mask (0 or 1)
-                    final_mask = cv_result[0].astype(np.uint8)
+                    progress_pct = int(((i + 1) / total_frames) * 50)
+                    signals.progress.emit(progress_pct)
 
-                    # Optional Morphology cleanup (ensure mask is 0/255 for cv2)
-                    cleaned_mask = cv2.morphologyEx(final_mask * 255, cv2.MORPH_OPEN, kernel)
-                    binary_mask = cleaned_mask // 255
+            signals.message.emit("Processing segmentation masks...")
 
-                    # if i % 10 == 0:  # Only log every 10th frame so we don't spam the console  ## Debugging
-                    #     log.info(f"--- FRAME {i} | ROI {roi_idx} ---")
-                    #     log.info(f"1. Crop Shape: {crop.shape}")
-                    #     log.info(f"2. Seed Pixels: {np.sum(seed_mask)}")
-                    #     log.info(f"3. Chan-Vese Pixels: {np.sum(final_mask)}")
-                    #     log.info(f"4. Cleaned Pixels: {np.sum(binary_mask)}")
+            # --- CONSUMER LOOP ---
+            # Process results as they finish (this handles the progress bar too!)
+            completed = 0
+            for future in concurrent.futures.as_completed(futures):
+                try:
+                    result = future.result()
 
-                    # --- MASK CROPPING & STORAGE ---
-                    # Find coordinates of all non-zero pixels
-                    y_idx, x_idx = np.nonzero(binary_mask)
-
-                    if len(y_idx) > 0:
-                        # Get bounding box of the active mask
-                        min_y, max_y = y_idx.min(), y_idx.max()
-                        min_x, max_x = x_idx.min(), x_idx.max()
-
-                        # Slice the array and cast to boolean (1 byte per pixel)
-                        tight_mask = binary_mask[min_y:max_y + 1, min_x:max_x + 1].astype(bool)
-                        mask_data = {
-                            'mask': tight_mask,
-                            'offset_x': int(min_x),
-                            'offset_y': int(min_y)
-                        }
+                    # Route the result to the right storage based on ROI index
+                    f_idx = result['frame_idx']
+                    if result['roi_idx'] == 0:
+                        width_results[f_idx] = result['mask_data']
                     else:
-                        mask_data = {
-                            'mask': np.array([], dtype=bool),
-                            'offset_x': 0,
-                            'offset_y': 0
-                        }
-                        # -------------------------------
+                        thickness_results[f_idx] = result['mask_data']
 
-                    # Simply store the masks based on the ROI index
-                    if roi_idx == 0:
-                        width_masks_out.append(mask_data)
-                    else:
-                        thickness_masks_out.append(mask_data)
+                    completed += 1
 
-                    # Both ROIs for this frame are processed. Log the frame index.
-                frames_out.append(i)
+                    # Update progress (divide by 2 because there are 2 ROIs per frame)
+                    if completed % 2 == 0:
+                        frames_processed = completed / 2
+                        # Start at 50, and add the remaining 50% based on completion
+                        progress_pct = 50 + int((frames_processed / total_frames) * 50)
+                        signals.progress.emit(progress_pct)
 
-                # Update Progress
-                progress_pct = int(((i + 1) / total_frames) * 100)
-                signals.progress.emit(progress_pct)
+                except Exception as exc:
+                    print(f"Worker generated an exception: {exc}")
 
-            signals.message.emit("Geometry calculation complete.")
+    # Reconstruct the ordered lists from the dictionaries
+    width_masks_out = [width_results[i] for i in range(total_frames)]
+    thickness_masks_out = [thickness_results[i] for i in range(total_frames)]
 
-            # Return only the frames and the raw segmentation masks
-            return {
-                #'idx': frames_out,
-                'first_masks': width_masks_out,
-                'second_masks': thickness_masks_out
-            }
+    return {
+        'first_masks': width_masks_out,
+        'second_masks': thickness_masks_out
+    }
 
-    except Exception as e:
-        signals.message.emit(f"Error calculating geometry: {str(e)}")
-        raise e
+def compute_chan_vese_worker(payload: dict):
+    """
+    Expects a payload with:
+    - crop: the cropped numpy array
+    - seed_mask: the generated seed mask
+    - mu, gamma, lambda1
+    - frame_idx, roi_idx (to keep track of results since processes finish out of order)
+    """
+    # 1. Unpack
+    crop = payload['crop']
+    seed_mask = payload['seed_mask']
+    mu, gamma, lambda1 = payload['mu'], payload['gamma'], payload['lambda1']
+    frame_idx, roi_idx = payload['frame_idx'], payload['roi_idx']
+
+    if crop.size == 0:
+        return {'frame_idx': frame_idx, 'roi_idx': roi_idx,
+                'mask_data': {'mask': np.array([]), 'offset_x': 0, 'offset_y': 0}}
+
+    # 2. Apply Gamma & Chan-Vese
+    img_float = img_as_float(crop)
+    if gamma != 1.0:
+        img_float = img_float ** gamma
+
+    cv_result = chan_vese(img_float, mu=mu, lambda1=lambda1, lambda2=1.0,
+                          tol=1e-3, max_num_iter=100, dt=0.5,
+                          init_level_set=seed_mask, extended_output=True)
+
+    # 3. Morphology & Tight Masking (keep your existing cleanup logic here)
+    final_mask = cv_result[0].astype(np.uint8)
+
+    # Optional Morphology cleanup (ensure mask is 0/255 for cv2)
+    cleaned_mask = cv2.morphologyEx(final_mask * 255, cv2.MORPH_OPEN, KERNEL)
+    binary_mask = cleaned_mask // 255
+
+    # --- MASK CROPPING & STORAGE ---
+    # Find coordinates of all non-zero pixels
+    y_idx, x_idx = np.nonzero(binary_mask)
+
+    if len(y_idx) > 0:
+        # Get bounding box of the active mask
+        min_y, max_y = y_idx.min(), y_idx.max()
+        min_x, max_x = x_idx.min(), x_idx.max()
+
+        # Slice the array and cast to boolean (1 byte per pixel)
+        tight_mask = binary_mask[min_y:max_y + 1, min_x:max_x + 1].astype(bool)
+        mask_data = {
+            'mask': tight_mask,
+            'offset_x': int(min_x),
+            'offset_y': int(min_y)
+        }
+    else:
+        mask_data = {
+            'mask': np.array([], dtype=bool),
+            'offset_x': 0,
+            'offset_y': 0
+        }
+        # -------------------------------
+
+    # Return the lightweight data
+    return {
+        'frame_idx': frame_idx,
+        'roi_idx': roi_idx,
+        'mask_data': mask_data  # dict with 'mask', 'offset_x', 'offset_y'
+    }
