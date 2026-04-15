@@ -43,6 +43,7 @@ class DataPipeline(QObject):
     scale_is_manual_changed = Signal(bool)
     manual_conversion_factor_changed = Signal(float)
     conversion_factor_changed = Signal(float)
+    scale_line_coords_changed = Signal(list)
 
     # Frames
     left_image_changed = Signal(np.ndarray)
@@ -71,6 +72,8 @@ class DataPipeline(QObject):
         self.author = None
         self.video_formats = [".tiff", ".tif", ".avi", ".mkv"]
 
+        self.loaded_state = False
+
         self.platform = 'mac' if sys.platform == 'darwin' else 'win'
         self.ctrl_key = "Cmd" if self.platform == "mac" else "Ctrl"
 
@@ -91,6 +94,7 @@ class DataPipeline(QObject):
         self.scale_is_manual = False
         self.manual_conversion_factor = 0.0
         self.conversion_factor = 0.0  # The final, authoritative value
+        self.scale_line_coords = []
 
         self.left_image: np.ndarray | None = None
 
@@ -224,7 +228,22 @@ class DataPipeline(QObject):
             self.known_length_changed.emit(self.known_length)
             self._recalculate_conversion_factor()
 
-    def set_pixel_length(self, length: float):
+    def set_scale_line_data(self, flat_data: list):
+        # Guard clause in case something weird happens
+        if not flat_data or len(flat_data) != 5:
+            return
+
+        # Unpack the 5 numbers
+        length = flat_data[0]
+
+        # Reconstruct the coordinate list for saving/injecting later
+        coords = [
+            (flat_data[1], flat_data[2]),
+            (flat_data[3], flat_data[4])
+        ]
+
+        self.scale_line_coords = coords
+
         if self.pixel_length != length:
             self.pixel_length = length
             self.pixel_length_changed.emit(self.pixel_length)

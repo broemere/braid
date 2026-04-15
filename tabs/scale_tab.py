@@ -3,12 +3,11 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QDoubleSpinBox, QSizePolicy,
     QStyle,  QButtonGroup, QStackedWidget, QCheckBox
 )
-from PySide6.QtGui import QIcon
+from PySide6.QtGui import QKeyEvent
 from data_pipeline import DataPipeline
 import numpy as np
 from widgets.scale_widget import ScaledLineCanvas
 from processing.data_transform import numpy_to_qpixmap
-from processing.resource_loader import resource_path
 import logging
 log = logging.getLogger(__name__)
 
@@ -18,8 +17,12 @@ class ScaleTab(QWidget):
     def __init__(self, pipeline: DataPipeline, parent=None):
         super().__init__(parent)
         self.pipeline = pipeline
+        self._has_been_shown = False  # NEW: Add the flag here
         self.init_ui()
         self.connect_signals()
+
+        # Allow the tab to catch keyboard events for zooming
+        self.setMouseTracking(True)
 
     def init_ui(self):
         layout = QVBoxLayout(self)
@@ -35,18 +38,6 @@ class ScaleTab(QWidget):
         self.refresh_btn = QPushButton(self.style().standardIcon(QStyle.SP_BrowserReload), "")
         self.refresh_btn.setToolTip("Reload original image and clear zoom/line.")
         ctrl_row.addWidget(self.refresh_btn)
-        self.zoom_btn = QPushButton(QIcon(resource_path("resources/zoom.png")), "")
-        self.zoom_btn.setToolTip("Zoom Mode")
-        self.zoom_btn.setCheckable(True)
-        self.line_btn = QPushButton(QIcon(resource_path("resources/scale.png")), "")
-        self.line_btn.setToolTip("Line Drawing Mode")
-        self.line_btn.setCheckable(True)
-        self.mode_group = QButtonGroup(self)
-        self.mode_group.setExclusive(True)
-        self.mode_group.addButton(self.zoom_btn)
-        self.mode_group.addButton(self.line_btn)
-        ctrl_row.addWidget(self.zoom_btn)
-        ctrl_row.addWidget(self.line_btn)
         self.undo_btn = QPushButton("Undo Line")
         ctrl_row.addWidget(self.undo_btn)
         ctrl_row.addStretch()
@@ -85,11 +76,24 @@ class ScaleTab(QWidget):
         scale_row.addWidget(self.manual_mode_check)
         layout.addLayout(scale_row)
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        current_image = self.pipeline.left_image
+        if current_image is not None and not self._has_been_shown:
+            self._has_been_shown = True
+
+            # 1. This clears the scene and sets the image
+            self._show_scale_image(current_image)
+
+            # 2. INJECT INITIAL STATE: Safely inject AFTER the clear
+            if self.pipeline.loaded_state and len(self.pipeline.scale_line_coords) > 0:
+                self.line_canvas.inject_line(self.pipeline.scale_line_coords)
+
     def connect_signals(self):
         """Connect UI events to the pipeline (Model) and pipeline events to UI updates."""
         # --- Connections FROM UI TO PIPELINE (User Actions) ---
         self.known_length_spin.editingFinished.connect(self._on_known_length_finished)
-        self.line_canvas.line_completed.connect(self.pipeline.set_pixel_length)
+        self.line_canvas.line_completed.connect(self.pipeline.set_scale_line_data)
         self.manual_mode_check.toggled.connect(self.pipeline.set_scale_is_manual)
         self.manual_conversion_spin.editingFinished.connect(self._on_manual_factor_finished)
 
@@ -97,35 +101,30 @@ class ScaleTab(QWidget):
         self.pipeline.known_length_changed.connect(self.known_length_spin.setValue)
         self.pipeline.pixel_length_changed.connect(lambda l: self.pixel_label.setText(f"{l:.2f}"))
         self.pipeline.conversion_factor_changed.connect(lambda f: self.conversion_label.setText(f"{f:.4f}"))
-        self.pipeline.scale_is_manual_changed.connect(self.manual_mode_check.setChecked)  # Updates checkbox
-        self.pipeline.scale_is_manual_changed.connect(self._on_manual_mode_toggled)  # Updates other UIs
+        self.pipeline.scale_is_manual_changed.connect(self.manual_mode_check.setChecked)
+        self.pipeline.scale_is_manual_changed.connect(self._on_manual_mode_toggled)
         self.pipeline.left_image_changed.connect(self._show_scale_image)
         self.pipeline.manual_conversion_factor_changed.connect(self.manual_conversion_spin.setValue)
+        self.pipeline.scale_line_coords_changed.connect(self._inject_saved_line)
 
         # --- Local UI Connections (No Data Logic) ---
         self.refresh_btn.clicked.connect(self._reload_base_image)
         self.undo_btn.clicked.connect(self.line_canvas.undo_last_line)
-        self.line_canvas.mode_changed.connect(self._on_canvas_mode_changed)
-        self.mode_group.buttonClicked.connect(self._on_tool_button_clicked)
 
     # --- UI Synchronization and State Management ---
 
-    @Slot()
     def _show_scale_image(self, img_array: np.ndarray):
-        """Convert numpy array to QPixmap and set it as the canvas background."""
         pixmap = numpy_to_qpixmap(img_array)
-        self.line_canvas.set_background(pixmap)
+
+        if self._has_been_shown:
+            # Setting the background automatically resets the canvas zoom and wipes active lines
+            self.line_canvas.set_background(pixmap)
 
     def _reload_base_image(self):
-        """Fetches the original image from the pipeline and resets the canvas."""
+        """Triggered by the Refresh button. A purely destructive reset."""
         if self.pipeline.left_image is not None:
+            self.pipeline.set_scale_line_data([])
             self._show_scale_image(self.pipeline.left_image)
-
-    def _on_canvas_mode_changed(self, new_mode: str):
-        """Keeps the mode buttons in sync with the canvas's internal mode."""
-        is_zoom = new_mode == 'zoom'
-        self.zoom_btn.setChecked(is_zoom)
-        self.line_btn.setChecked(not is_zoom)
 
     @Slot()
     def _on_manual_mode_toggled(self, is_checked: bool):
@@ -151,3 +150,19 @@ class ScaleTab(QWidget):
             self.line_canvas.set_mode('zoom')
         elif button == self.line_btn:
             self.line_canvas.set_mode('line')
+
+    def _inject_saved_line(self, coords: list):
+        if coords and len(coords) == 2:
+            self.line_canvas.inject_line(coords)
+
+    def keyPressEvent(self, event: QKeyEvent):
+        """Forwards zoom shortcut keys to the canvas."""
+        key = event.key()
+        if key in (Qt.Key_Equal, Qt.Key_Plus):
+            self.line_canvas._zoom(1.5)
+            event.accept()
+        elif key in (Qt.Key_Minus, Qt.Key_Underscore):
+            self.line_canvas._zoom(1 / 1.5)
+            event.accept()
+        else:
+            super().keyPressEvent(event)
