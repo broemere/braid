@@ -1,16 +1,55 @@
 from PySide6.QtCore import Qt, Slot
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QSlider, QSizePolicy
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QSlider, QSizePolicy, QBoxLayout
 )
+from PySide6.QtGui import QPixmap, QPainter
 from processing.data_transform import numpy_to_qpixmap
 from data_pipeline import DataPipeline
+
+
+class ImageDisplayWidget(QWidget):
+    """A passive canvas that scales an image to fit its layout space without fighting it."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.pixmap = None
+        # Allow it to expand perfectly equally
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        # Low minimum size ensures it never forces the window to grow
+        self.setMinimumSize(50, 50)
+
+    def set_pixmap(self, pixmap: QPixmap):
+        self.pixmap = pixmap
+        self.update()  # Trigger a repaint
+
+    def paintEvent(self, event):
+        if not self.pixmap:
+            return
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        # Draw background if desired (matches your previous stylesheet)
+        painter.fillRect(self.rect(), Qt.GlobalColor.black)
+
+        # Calculate the scaled size keeping aspect ratio
+        scaled_pixmap = self.pixmap.scaled(
+            self.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation
+        )
+
+        # Calculate coordinates to center the image
+        x = (self.width() - scaled_pixmap.width()) // 2
+        y = (self.height() - scaled_pixmap.height()) // 2
+
+        # Draw the image
+        painter.drawPixmap(x, y, scaled_pixmap)
 
 
 class ThreshTab(QWidget):
     def __init__(self, pipeline: DataPipeline, parent=None):
         super().__init__(parent)
         self.pipeline = pipeline
-        self.image_labels = []  # To hold our 4 ROI labels
+        self.image_widgets = []  # Changed from labels to our custom widgets
         self.init_ui()
         self.connect_signals()
 
@@ -18,15 +57,18 @@ class ThreshTab(QWidget):
         layout = QVBoxLayout(self)
 
         # --- Image Display Row ---
-        self.img_row = QHBoxLayout()
+        #self.img_row = QHBoxLayout()
+
+        self.img_row = QBoxLayout(QBoxLayout.Direction.TopToBottom)
+
         for i in range(4):
-            label = QLabel(f"ROI {i + 1}")
-            label.setAlignment(Qt.AlignCenter)
-            label.setMinimumSize(150, 150)
-            label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-            label.setStyleSheet("border: 1px solid #444; background: #222;")
-            self.image_labels.append(label)
-            self.img_row.addWidget(label)
+            # Use our custom widget instead of QLabel
+            widget = ImageDisplayWidget()
+            self.image_widgets.append(widget)
+
+            # stretch=1 now works perfectly because ImageDisplayWidget
+            # doesn't have an unpredictable sizeHint skewing the math.
+            self.img_row.addWidget(widget, stretch=1)
 
         layout.addLayout(self.img_row, stretch=1)
 
@@ -64,7 +106,12 @@ class ThreshTab(QWidget):
     def showEvent(self, event):
         super().showEvent(event)
         # Trigger an initial calculation when the tab is opened
+        if self.pipeline.layout == "vertical" and self.img_row.direction() == QBoxLayout.Direction.LeftToRight:
+            self.img_row.setDirection(QBoxLayout.Direction.TopToBottom)
+        if self.pipeline.layout == "horizontal" and self.img_row.direction() == QBoxLayout.Direction.TopToBottom:
+            self.img_row.setDirection(QBoxLayout.Direction.LeftToRight)
         self._on_sliders_moved()
+
 
     def connect_signals(self):
         # UI -> Pipeline (Both sliders trigger the same function)
@@ -86,12 +133,20 @@ class ThreshTab(QWidget):
         # Tell the pipeline to process current crops with both values
         self.pipeline.apply_threshold(smooth_val, shadow_val)
 
+    # @Slot(list)
+    # def update_displays(self, threshed_pixmaps):
+    #     """Receives a list of 4 QPixmaps from the pipeline."""
+    #     for label, pixmap in zip(self.image_labels, threshed_pixmaps):
+    #         # Scale to fit label while keeping aspect ratio
+    #         scaled_pix = pixmap.scaled(
+    #             label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation
+    #         )
+    #         label.setPixmap(scaled_pix)
+
     @Slot(list)
     def update_displays(self, threshed_pixmaps):
         """Receives a list of 4 QPixmaps from the pipeline."""
-        for label, pixmap in zip(self.image_labels, threshed_pixmaps):
-            # Scale to fit label while keeping aspect ratio
-            scaled_pix = pixmap.scaled(
-                label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation
-            )
-            label.setPixmap(scaled_pix)
+        for widget, pixmap in zip(self.image_widgets, threshed_pixmaps):
+            # We no longer manually scale here! We just hand the pixmap
+            # to the widget, and it handles the scaling in real-time.
+            widget.set_pixmap(pixmap)

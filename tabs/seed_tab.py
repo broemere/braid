@@ -1,5 +1,5 @@
 from PySide6.QtCore import Qt, Slot
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QButtonGroup, QRadioButton
+from PySide6.QtWidgets import QWidget, QBoxLayout, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QButtonGroup, QRadioButton
 from widgets.seed_widget import SeedDrawingLabel
 
 
@@ -31,19 +31,22 @@ class SeedTab(QWidget):
         tool_layout.addWidget(self.rb_ellipse)
         tool_layout.addStretch()
 
+        tool_layout.addStretch()
+
+        # Flip Layout Button
+        self.btn_flip = QPushButton("Flip Layout")
+        self.btn_flip.clicked.connect(self.toggle_layout)
+        tool_layout.addWidget(self.btn_flip)
+
         main_layout.addLayout(tool_layout)
 
         # --- Image Editors Row ---
-        editors_layout = QHBoxLayout()
+        #editors_layout = QHBoxLayout()
+        self.editors_layout = QBoxLayout(QBoxLayout.Direction.TopToBottom)
 
-        # We need 2 editors
+        # We need 4 editors
         for i in range(4):
             v_box = QVBoxLayout()
-
-            # Label Title
-            lbl_title = QLabel(f"Image {i + 1} Seed")
-            lbl_title.setAlignment(Qt.AlignCenter)
-            v_box.addWidget(lbl_title)
 
             # Custom Editor Widget
             editor = SeedDrawingLabel()
@@ -58,9 +61,9 @@ class SeedTab(QWidget):
             btn_undo.clicked.connect(lambda checked=False, e=editor: e.undo())
             v_box.addWidget(btn_undo)
 
-            editors_layout.addLayout(v_box, stretch=1)
+            self.editors_layout.addLayout(v_box, stretch=1)
 
-        main_layout.addLayout(editors_layout, stretch=1)
+        main_layout.addLayout(self.editors_layout, stretch=1)
 
     def connect_signals(self):
         # 1. Tool Selection Changes
@@ -76,6 +79,18 @@ class SeedTab(QWidget):
             editor.shape_drawn.connect(
                 lambda s_type, data, idx=i: self._on_shape_drawn(idx, s_type, data)
             )
+
+    @Slot()
+    def toggle_layout(self):
+        """Swaps the editor layout direction between horizontal and vertical."""
+        current_dir = self.editors_layout.direction()
+
+        if current_dir == QBoxLayout.Direction.LeftToRight:
+            self.editors_layout.setDirection(QBoxLayout.Direction.TopToBottom)
+            self.pipeline.layout = "vertical"
+        else:
+            self.editors_layout.setDirection(QBoxLayout.Direction.LeftToRight)
+            self.pipeline.layout = "horizontal"
 
     def _on_tool_change(self):
         tool = 'rect' if self.rb_rect.isChecked() else 'ellipse'

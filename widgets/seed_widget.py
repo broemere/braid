@@ -9,8 +9,9 @@ class SeedDrawingLabel(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setMinimumSize(300, 300)
+        self.setMinimumSize(50, 50)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        #self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
         self.setMouseTracking(True)
 
         self.original_pixmap = None

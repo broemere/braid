@@ -112,6 +112,8 @@ class DataPipeline(QObject):
         self.xy_roi_idx = 0
         self.thickness_roi_idx = 1
 
+        self.layout = "vertical"
+
     @Slot(float, object)
     def set_trimmed_data(self, trim_time: float, trimmed_data: np.ndarray):
         """Receives trimmed data from the PlotTab and broadcasts it to the rest of the app."""
@@ -782,7 +784,8 @@ class DataPipeline(QObject):
                 # X Measure: Horizontal sum (across columns -> axis=1)
                 x_sums = np.sum(xy_mask, axis=1)
                 valid_x = x_sums[x_sums > 0]
-                raw_x.append(np.mean(valid_x) if len(valid_x) > 0 else 0)
+                raw_x.append(np.max(valid_x) if len(valid_x) > 0 else 0)
+                #raw_x.append(np.mean(valid_x) if len(valid_x) > 0 else 0)
 
                 # Y Measure: Vertical sum (across rows -> axis=0)
                 y_sums = np.sum(xy_mask, axis=0)

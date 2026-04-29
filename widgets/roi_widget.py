@@ -1,15 +1,17 @@
 from PySide6.QtCore import Qt, Signal, QPointF, QRect, QRectF
-from PySide6.QtWidgets import QWidget
-from PySide6.QtGui import QPixmap, QColor, QPainter, QPen, QCursor
+from PySide6.QtWidgets import QGraphicsView, QGraphicsScene, QGraphicsRectItem
+from PySide6.QtGui import QPixmap, QColor, QPainter, QPen
 
 
-class ROICanvas(QWidget):
+class ROICanvas(QGraphicsView):
     """
-    A canvas for selecting Regions of Interest (ROIs).
+    A zoomable canvas for selecting Regions of Interest (ROIs).
     - Allows exactly two boxes to be drawn.
+    - Click once to start a box, click again to finish.
     - Drawing a third box replaces the first one (FIFO).
-    - Supports Undo (Ctrl+Z) and Reset.
-    - Emits all current ROI coordinates whenever they change.
+    - Supports Zoom (Ctrl+Scroll / +/-) and Pan (Shift+Scroll).
+    - Supports Undo (Ctrl+Z) and Cancel current draw (Escape).
+    - Emits a list of QRects in true image coordinates.
     """
 
     # Emits a list of QRects representing the boxes in image-space
@@ -17,157 +19,198 @@ class ROICanvas(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._pix_full: QPixmap | None = None
-        self.rois: list[QRect] = []
+
+        # --- Scene and View Setup ---
+        self._scene = QGraphicsScene(self)
+        self.setScene(self._scene)
+        self.setRenderHint(QPainter.Antialiasing, True)
+        self.setDragMode(QGraphicsView.NoDrag)
+        self.setResizeAnchor(QGraphicsView.AnchorViewCenter)
+        self.setMouseTracking(True)
+        self.setCursor(Qt.CrossCursor)
+        self.setBackgroundBrush(QColor("#222222"))
+
+        # --- State Variables ---
+        self._image_item = None
+        self.rois_items: list[QGraphicsRectItem] = []
 
         self.current_start_pt: QPointF | None = None
-        self._mouse_pos: QPointF | None = None
+        self._preview_rect_item: QGraphicsRectItem | None = None
 
-        self.active_color = QColor(Qt.red)
-        self.completed_color = QColor(Qt.green)
+        # --- Drawing Styles ---
+        self.active_pen = QPen(QColor(Qt.red), 1, Qt.DashLine)
+        self.active_pen.setCosmetic(True)  # Prevents line scaling when zooming
 
-        # We cache these to make coordinate conversion fast and accurate
-        self._offset_x = 0.0
-        self._offset_y = 0.0
-        self._scale_factor = 1.0
-        self._scaled_w = 0
-        self._scaled_h = 0
-
-        self.setCursor(Qt.CrossCursor)
-        self.setMouseTracking(True)
-        self.setFocusPolicy(Qt.StrongFocus)
+        self.completed_pen = QPen(QColor(Qt.green), 2)
+        self.completed_pen.setCosmetic(True)
 
     # ——————————————
     # Public API
 
     def set_background(self, pixmap: QPixmap):
-        """Load a new image and clear existing ROIs."""
-        self._pix_full = pixmap
-        self.reset_rois()
+        """Load a new image, clear existing ROIs, and reset view."""
+        self._scene.clear()
+        self.rois_items.clear()
+        self.current_start_pt = None
+        self._preview_rect_item = None
+
+        self._image_item = self._scene.addPixmap(pixmap)
+        self.reset_view()
+        self.roi_updated.emit([])
+
+    def reset_view(self):
+        """Resets the view to fit the entire image within the viewport."""
+        if self._image_item:
+            self.fitInView(self._image_item, Qt.KeepAspectRatio)
 
     def reset_rois(self):
-        """Clear all boxes."""
-        self.rois = []
-        self.current_start_pt = None
-        self.update()
-        self.roi_updated.emit(self.rois)
+        """Clear all drawn boxes."""
+        for item in self.rois_items:
+            self._scene.removeItem(item)
+        self.rois_items.clear()
+        self._cancel_preview()
+        self.roi_updated.emit([])
 
     def undo_last_roi(self):
         """Remove the most recently added box (LIFO)."""
-        if self.rois:
-            self.rois.pop()
-            self.update()
-            self.roi_updated.emit(self.rois)
+        if self.rois_items:
+            item = self.rois_items.pop()
+            self._scene.removeItem(item)
+            self._emit_rois()
+
+    def _cancel_preview(self):
+        """Cancels a drawing in progress."""
+        if self._preview_rect_item:
+            self._scene.removeItem(self._preview_rect_item)
+            self._preview_rect_item = None
+        self.current_start_pt = None
+
+    def _emit_rois(self):
+        """Converts scene items to standard QRects and emits them."""
+        # Convert QRectF bounds to standard integer QRects
+        rects = [item.rect().toRect() for item in self.rois_items]
+        self.roi_updated.emit(rects)
 
     # ——————————————
-    # Event Handlers
+    # Internal View Math
+
+    def _clamp_to_image(self, pos: QPointF) -> QPointF:
+        """Forces coordinates to stay strictly within image boundaries."""
+        if not self._image_item:
+            return pos
+        rect = self._image_item.boundingRect()
+        x = max(rect.left(), min(pos.x(), rect.right()))
+        y = max(rect.top(), min(pos.y(), rect.bottom()))
+        return QPointF(x, y)
+
+    def _zoom(self, factor):
+        """Applies a zoom factor, centered on the mouse cursor."""
+        if self._image_item is None:
+            return
+        if factor < 1.0:
+            h_bar = self.horizontalScrollBar()
+            v_bar = self.verticalScrollBar()
+            if h_bar.maximum() <= 0 and v_bar.maximum() <= 0:
+                return
+        self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
+        self.scale(factor, factor)
+        self.setTransformationAnchor(QGraphicsView.NoAnchor)
+
+    # ——————————————
+    # Mouse & Key Events
+
+    def wheelEvent(self, event):
+        """Handles zooming and panning via the mouse wheel."""
+        if self._image_item is None:
+            return
+
+        angle = event.angleDelta().y()
+
+        if event.modifiers() == Qt.ControlModifier:
+            if angle > 0:
+                self._zoom(1.15)
+            else:
+                self._zoom(1 / 1.15)
+        elif event.modifiers() == Qt.ShiftModifier:
+            h_bar = self.horizontalScrollBar()
+            h_bar.setValue(h_bar.value() - angle)
+        else:
+            super().wheelEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        """Resets the view on double-click."""
+        if event.button() == Qt.LeftButton:
+            self.reset_view()
+        super().mouseDoubleClickEvent(event)
 
     def mousePressEvent(self, event):
-        if event.button() != Qt.LeftButton or self._pix_full is None:
+        """Handles the click-to-start, click-to-finish drawing logic."""
+        if event.button() != Qt.LeftButton or self._image_item is None:
+            super().mousePressEvent(event)
             return
 
-        img_pt = self._widget_to_image(event.position())
-        if img_pt is None:
-            return
+        # 1. Map viewport click to native image coordinates
+        scene_pos = self.mapToScene(event.pos())
+        img_pt = self._clamp_to_image(scene_pos)
 
+        # 2. First click: Start the preview rectangle
         if self.current_start_pt is None:
             self.current_start_pt = img_pt
+            self._preview_rect_item = QGraphicsRectItem(QRectF(img_pt, img_pt))
+            self._preview_rect_item.setPen(self.active_pen)
+            self._scene.addItem(self._preview_rect_item)
+
+        # 3. Second click: Finalize the rectangle
         else:
-            # Finalize the second point
-            new_roi = QRect(
-                self.current_start_pt.toPoint(),
-                img_pt.toPoint()
-            ).normalized()
+            final_rect = QRectF(self.current_start_pt, img_pt).normalized()
 
-            if len(self.rois) >= 2:
-                self.rois.pop(0)
+            # Remove preview item
+            self._cancel_preview()
 
-            self.rois.append(new_roi)
-            self.current_start_pt = None
-            self.roi_updated.emit(self.rois)
+            # Create the final green rectangle
+            rect_item = QGraphicsRectItem(final_rect)
+            rect_item.setPen(self.completed_pen)
+            self._scene.addItem(rect_item)
 
-        self.update()
+            # FIFO logic: Ensure max 2 rectangles
+            if len(self.rois_items) >= 2:
+                oldest = self.rois_items.pop(0)
+                self._scene.removeItem(oldest)
+
+            self.rois_items.append(rect_item)
+            self._emit_rois()
 
     def mouseMoveEvent(self, event):
-        self._mouse_pos = event.position()
-        if self.current_start_pt:
-            self.update()
+        """Updates the preview dashed box as the user moves the mouse."""
+        if self.current_start_pt and self._preview_rect_item:
+            scene_pos = self.mapToScene(event.pos())
+            img_pt = self._clamp_to_image(scene_pos)
+
+            # .normalized() allows drawing in any direction safely
+            new_rect = QRectF(self.current_start_pt, img_pt).normalized()
+            self._preview_rect_item.setRect(new_rect)
+
+        super().mouseMoveEvent(event)
 
     def keyPressEvent(self, event):
-        # Ctrl + Z for Undo
+        """Handles Undo, Cancel, and Keyboard Zoom shortcuts."""
+        # Undo (Ctrl+Z)
         if event.key() == Qt.Key_Z and event.modifiers() & Qt.ControlModifier:
             self.undo_last_roi()
+            event.accept()
 
-        # Escape to cancel current drawing
+        # Cancel current draw
         elif event.key() == Qt.Key_Escape:
-            if self.current_start_pt:
-                self.current_start_pt = None
-                self.update()
+            self._cancel_preview()
+            event.accept()
 
-        super().keyPressEvent(event)
+        # Keyboard Zoom (+ / -)
+        elif event.key() in (Qt.Key_Equal, Qt.Key_Plus):
+            self._zoom(1.5)
+            event.accept()
+        elif event.key() in (Qt.Key_Minus, Qt.Key_Underscore):
+            self._zoom(1 / 1.5)
+            event.accept()
 
-    # ——————————————
-    # Painting
-
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
-        if self._pix_full is None: return
-
-        # 1. Update Scaling Math
-        # We calculate this here so it's always fresh if the window resized
-        w, h = self.width(), self.height()
-        pix_w, pix_h = self._pix_full.width(), self._pix_full.height()
-
-        # Calculate how the image fits (KeepAspectRatio)
-        self._scale_factor = min(w / pix_w, h / pix_h)
-        self._scaled_w = int(pix_w * self._scale_factor)
-        self._scaled_h = int(pix_h * self._scale_factor)
-        self._offset_x = (w - self._scaled_w) / 2
-        self._offset_y = (h - self._scaled_h) / 2
-
-        # 2. Draw Background
-        painter.drawPixmap(
-            int(self._offset_x), int(self._offset_y),
-            self._scaled_w, self._scaled_h,
-            self._pix_full
-        )
-
-        # 3. Draw ROIs
-        for roi in self.rois:
-            painter.setPen(QPen(self.completed_color, 2))
-            painter.drawRect(self._image_rect_to_widget(roi))
-
-        # 4. Draw Preview
-        if self.current_start_pt and self._mouse_pos:
-            p0 = self._image_to_widget(self.current_start_pt)
-            p1 = self._mouse_pos
-            rect = QRect(p0.toPoint(), p1.toPoint()).normalized()
-            painter.setPen(QPen(self.active_color, 1, Qt.DashLine))
-            painter.drawRect(rect)
-
-    # ——————————————
-    # Coordinate Helpers
-
-    def _widget_to_image(self, pt: QPointF) -> QPointF | None:
-        if self._pix_full is None: return None
-        # Subtract offset, then divide by scale to "get back" to original pixels
-        x = (pt.x() - self._offset_x) / self._scale_factor
-        y = (pt.y() - self._offset_y) / self._scale_factor
-
-        # Clamp to ensure coordinates stay within the actual image pixels
-        return QPointF(
-            max(0, min(x, self._pix_full.width())),
-            max(0, min(y, self._pix_full.height()))
-        )
-
-    def _image_to_widget(self, pt: QPointF) -> QPointF:
-        return QPointF(
-            pt.x() * self._scale_factor + self._offset_x,
-            pt.y() * self._scale_factor + self._offset_y
-        )
-
-    def _image_rect_to_widget(self, rect: QRect) -> QRect:
-        tl = self._image_to_widget(QPointF(rect.topLeft()))
-        br = self._image_to_widget(QPointF(rect.bottomRight()))
-        return QRect(tl.toPoint(), br.toPoint())
+        else:
+            super().keyPressEvent(event)
