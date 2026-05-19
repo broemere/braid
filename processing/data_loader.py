@@ -12,6 +12,8 @@ from PySide6.QtCore import QRect
 from processing.resource_loader import resource_path
 import concurrent.futures
 import multiprocessing
+from pathlib import Path
+import csv
 
 log = logging.getLogger(__name__)
 
@@ -72,9 +74,9 @@ def frame_loader(signals, file_path, frame_indices, count=False):
                         gray = gray.astype(np.uint8)
 
                         # Embed frame count into the first row of pixels
-                        if i + len(str(frame_count)) < gray.shape[1]:
+                        if len(str(frame_count)) < gray.shape[1]:
                             for j, digit in enumerate(str(frame_count)):
-                                gray[0, i + j] = int(digit)
+                                gray[0, j] = int(digit)
                         else:
                             log.warning(f"Frame {f}: Not enough horizontal pixels to write metadata.")
 
@@ -103,8 +105,6 @@ def frame_loader(signals, file_path, frame_indices, count=False):
                                 info = json.loads(desc.value)
                             except Exception:
                                 continue
-                            #t = info.get("frameIdx")
-
                             keys = list(info.keys())
 
                             for k in keys:
@@ -112,15 +112,11 @@ def frame_loader(signals, file_path, frame_indices, count=False):
                                     embedded_data[k] = []
                                 embedded_data[k].append(info[k])
 
-
                             # "time_s"
                             # "frameIdx"
                             # "distance"
                             # "cycle"
                             # "force"
-
-                            #if isinstance(t, (int, float)):
-                            #frames.append(t)
 
                             pct = int(((i + 1) / frame_count) * 100)
                             signals.progress.emit(pct)
@@ -132,8 +128,6 @@ def frame_loader(signals, file_path, frame_indices, count=False):
 
                     loaded_frames["data"] = embedded_data
 
-
-
         except Exception as e:
             err_msg = f"Failed to open or process TIFF file: {file_path}. Error: {e}"
             log.error(err_msg, exc_info=True)
@@ -141,12 +135,92 @@ def frame_loader(signals, file_path, frame_indices, count=False):
             raise IOError(err_msg)
 
     # --- Video File Handling (Original Logic) ---
+
+    elif file_ext in [".mkv"]:
+
+        vid = cv2.VideoCapture(file_path)
+        if not vid.isOpened():
+            err_msg = f"Failed to open video file: {file_path}"
+            log.error(err_msg)
+            signals.message.emit(err_msg)
+            raise IOError(err_msg)
+
+        try:
+            frame_count = int(vid.get(cv2.CAP_PROP_FRAME_COUNT))
+            signals.message.emit("Collecting frame data...")
+            log.info(f"Starting frame extraction for {len(frame_indices)} frames from {file_path}")
+
+            for i, f in enumerate(frame_indices):
+                try:
+                    vid.set(cv2.CAP_PROP_POS_FRAMES, f)
+                    res, frame = vid.read()
+
+                    if not res:
+                        log.warning(f"Could not read frame at index {f}. Skipping.")
+                        continue
+
+                    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                    cv2.normalize(gray, gray, 0, 255, cv2.NORM_MINMAX)
+
+                    # Embed frame count using the same logic as for TIFFs
+                    if len(str(frame_count)) < gray.shape[1]:
+                        for j, digit in enumerate(str(frame_count)):
+                            gray[0, j] = int(digit)
+                    else:
+                        log.warning(f"Frame {f}: Not enough horizontal pixels to write metadata.")
+
+                    loaded_frames[f] = gray
+
+                    pct = int(((i + 1) / len(frame_indices)) * 100)
+                    signals.progress.emit(pct)
+
+                except Exception as e:
+                    log.error(f"Error processing frame at index {f}: {e}", exc_info=True)
+                    signals.message.emit(f"Error on frame {f}, see log for details.")
+
+            if count:
+                loaded_frames[frame_count] = None
+        finally:
+            # Ensure the video capture is always released
+            log.info(f"Finished frame extraction. Releasing video capture for {file_path}.")
+            vid.release()
+
+
     else:
         raise "Other video files not yet supported. Contact customer support for additional help."
 
     signals.progress.emit(100)
     signals.message.emit("Frame processing complete.")
     return loaded_frames
+
+
+def parse_and_validate_csv(csv_path: Path) -> dict | None:
+    """Reads the CSV, validates columns, and returns a dictionary of lists."""
+    required_cols = {"time_s", "frame_index", "distance", "cycle", "force"}
+
+    try:
+        with open(csv_path, mode='r', encoding='utf-8-sig') as f:
+            reader = csv.DictReader(f)
+            headers = set(reader.fieldnames or [])
+
+            if not required_cols.issubset(headers):
+                log.warning(f"CSV missing columns. Expected {required_cols}, found {headers}")
+                return None
+
+            # Initialize the dictionary with empty lists
+            data = {col: [] for col in required_cols}
+
+            # Populate the dictionary
+            for row in reader:
+                for col in required_cols:
+                    # Convert to float (or int for frame_index if preferred)
+                    data[col].append(float(row[col]))
+
+            return data
+
+    except Exception as e:
+        log.error(f"Failed to parse CSV {csv_path}: {e}")
+        return None
 
 
 def _interpolate_rois_worker(roi_data: dict, pct: float) -> list[dict]:
@@ -350,6 +424,139 @@ def _interpolate_rois_worker(roi_data: dict, pct: float) -> list[dict]:
 #     except Exception as e:
 #         signals.message.emit(f"Error calculating geometry: {str(e)}")
 #         raise e
+#
+# def geometry_worker(signals, config: dict):
+#     file_path = config['file_path']
+#     distances = config['distances']
+#     min_dist = config['min_dist']
+#     max_dist = config['max_dist']
+#     roi_data = config['roi_data']
+#
+#     mu = config['mu']
+#     gamma = config['gamma']
+#     lambda1 = config['lambda1']
+#
+#     frames_out = []
+#     width_masks_out, thickness_masks_out = [], []
+#
+#     # Get optimal core count (leave one or two for the OS/GUI)
+#     max_workers = max(1, multiprocessing.cpu_count() - 2)
+#
+#     # We will store results in dictionaries since futures complete out of order
+#     width_results = {}
+#     thickness_results = {}
+#
+#     with TiffFile(file_path) as tif:
+#         total_frames = len(distances)
+#
+#         # Start the multiprocessing pool
+#         with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
+#             futures = []
+#
+#             signals.message.emit("Reading image data and queuing tasks...")
+#
+#             # --- PRODUCER LOOP ---
+#             for i, distance in enumerate(distances):
+#                 # 1. Calculate percentage and clamp it mathematically
+#                 pct = (distance - min_dist) / (max_dist - min_dist)
+#                 pct = np.clip(pct, 0.0, 1.0)
+#
+#                 # 2. Get interpolated boxes and seeds
+#                 interp_rois = _interpolate_rois_worker(roi_data, pct)
+#
+#                 frame = tif.pages[i].asarray()
+#                 if frame.ndim == 3:
+#                     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+#                 else:
+#                     gray = frame.copy()
+#
+#                 cv2.normalize(gray, gray, 0, 255, cv2.NORM_MINMAX)
+#                 gray = gray.astype(np.uint8)
+#                 dimensions = []  # Will hold [width_px, length_px]
+#
+#                 for roi_idx, roi in enumerate(interp_rois):
+#                     # 1. CROP THE IMAGE HERE (In the Manager)
+#                     r = roi['roi_rect']
+#                     crop = gray[r.y(): r.y() + r.height(), r.x(): r.x() + r.width()]
+#
+#                     # 2. GENERATE SEED MASK HERE
+#                     if crop.size == 0:
+#                         dimensions.append(0)
+#                         # Ensure we append empty masks to maintain index parity
+#                         empty_mask = {'mask': np.array([], dtype=bool), 'offset_x': 0, 'offset_y': 0}
+#                         if roi_idx == 0:
+#                             width_masks_out.append(empty_mask)
+#                         else:
+#                             thickness_masks_out.append(empty_mask)
+#                         continue
+#
+#                     # Generate Seed Mask
+#                     mask_shape = crop.shape
+#                     seed_mask = np.zeros(mask_shape, dtype=bool)
+#                     coords = roi['seed_coords']
+#
+#                     if roi['seed_shape_type'] == 'rect':
+#                         start = (coords['y'], coords['x'])
+#                         end = (coords['y'] + coords['h'], coords['x'] + coords['w'])
+#                         rr, cc = rectangle(start=start, end=end, shape=mask_shape)
+#                         seed_mask[rr, cc] = True
+#                     elif roi['seed_shape_type'] == 'ellipse':
+#                         rr, cc = ellipse(coords['center_y'], coords['center_x'],
+#                                          coords['radius_y'], coords['radius_x'], shape=mask_shape)
+#                         seed_mask[rr, cc] = True
+#
+#                     # 3. PACKAGE THE TINY PAYLOAD
+#                     payload = {
+#                         'crop': crop,
+#                         'seed_mask': seed_mask,
+#                         'mu': mu, 'gamma': gamma, 'lambda1': lambda1,
+#                         'frame_idx': i,
+#                         'roi_idx': roi_idx
+#                     }
+#
+#                     # 4. SUBMIT TO WORKER POOL
+#                     future = executor.submit(compute_chan_vese_worker, payload)
+#                     futures.append(future)
+#
+#                     progress_pct = int(((i + 1) / total_frames) * 50)
+#                     signals.progress.emit(progress_pct)
+#
+#             signals.message.emit("Processing segmentation masks...")
+#
+#             # --- CONSUMER LOOP ---
+#             # Process results as they finish (this handles the progress bar too!)
+#             completed = 0
+#             for future in concurrent.futures.as_completed(futures):
+#                 try:
+#                     result = future.result()
+#
+#                     # Route the result to the right storage based on ROI index
+#                     f_idx = result['frame_idx']
+#                     if result['roi_idx'] == 0:
+#                         width_results[f_idx] = result['mask_data']
+#                     else:
+#                         thickness_results[f_idx] = result['mask_data']
+#
+#                     completed += 1
+#
+#                     # Update progress (divide by 2 because there are 2 ROIs per frame)
+#                     if completed % 2 == 0:
+#                         frames_processed = completed / 2
+#                         # Start at 50, and add the remaining 50% based on completion
+#                         progress_pct = 50 + int((frames_processed / total_frames) * 50)
+#                         signals.progress.emit(progress_pct)
+#
+#                 except Exception as exc:
+#                     print(f"Worker generated an exception: {exc}")
+#
+#     # Reconstruct the ordered lists from the dictionaries
+#     width_masks_out = [width_results[i] for i in range(total_frames)]
+#     thickness_masks_out = [thickness_results[i] for i in range(total_frames)]
+#
+#     return {
+#         'first_masks': width_masks_out,
+#         'second_masks': thickness_masks_out
+#     }
 
 def geometry_worker(signals, config: dict):
     file_path = config['file_path']
@@ -365,115 +572,138 @@ def geometry_worker(signals, config: dict):
     frames_out = []
     width_masks_out, thickness_masks_out = [], []
 
+    # Determine the file type once
+    file_ext = os.path.splitext(file_path)[1].lower()
+    total_frames = len(distances)
+
     # Get optimal core count (leave one or two for the OS/GUI)
     max_workers = max(1, multiprocessing.cpu_count() - 2)
 
-    # We will store results in dictionaries since futures complete out of order
     width_results = {}
     thickness_results = {}
 
-    with TiffFile(file_path) as tif:
-        total_frames = len(distances)
+    # ---------------------------------------------------------
+    # Helper Generator: Abstracts the file reading logic
+    # ---------------------------------------------------------
+    def frame_generator():
+        if file_ext in ['.tif', '.tiff']:
+            with TiffFile(file_path) as tif:
+                for idx in range(total_frames):
+                    yield tif.pages[idx].asarray()
 
-        # Start the multiprocessing pool
-        with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
-            futures = []
+        elif file_ext == '.mkv':
+            cap = cv2.VideoCapture(file_path)
+            if not cap.isOpened():
+                raise IOError(f"Worker failed to open video file: {file_path}")
+            try:
+                for _ in range(total_frames):
+                    ret, frame_data = cap.read()
+                    if not ret:
+                        raise RuntimeError("Video ended prematurely before processing all distances.")
+                    yield frame_data
+            finally:
+                cap.release()  # Ensures the video file is safely closed even on error
 
-            signals.message.emit("Reading image data and queuing tasks...")
+        else:
+            raise ValueError(f"Unsupported geometry file format: {file_ext}")
 
-            # --- PRODUCER LOOP ---
-            for i, distance in enumerate(distances):
-                # 1. Calculate percentage and clamp it mathematically
-                pct = (distance - min_dist) / (max_dist - min_dist)
-                pct = np.clip(pct, 0.0, 1.0)
+    # Start the multiprocessing pool
+    with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
+        futures = []
 
-                # 2. Get interpolated boxes and seeds
-                interp_rois = _interpolate_rois_worker(roi_data, pct)
+        signals.message.emit("Reading image data and queuing tasks...")
 
-                frame = tif.pages[i].asarray()
-                if frame.ndim == 3:
-                    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        # --- PRODUCER LOOP ---
+        # Zip the distances array with our new unified frame generator
+        for i, (distance, frame) in enumerate(zip(distances, frame_generator())):
+
+            # 1. Calculate percentage and clamp it mathematically
+            pct = (distance - min_dist) / (max_dist - min_dist)
+            pct = np.clip(pct, 0.0, 1.0)
+
+            # 2. Get interpolated boxes and seeds
+            interp_rois = _interpolate_rois_worker(roi_data, pct)
+
+            # The frame format check remains exactly the same
+            if frame.ndim == 3:
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            else:
+                gray = frame.copy()
+
+            cv2.normalize(gray, gray, 0, 255, cv2.NORM_MINMAX)
+            gray = gray.astype(np.uint8)
+            dimensions = []  # Will hold [width_px, length_px]
+
+            for roi_idx, roi in enumerate(interp_rois):
+                # 1. CROP THE IMAGE HERE (In the Manager)
+                r = roi['roi_rect']
+                crop = gray[r.y(): r.y() + r.height(), r.x(): r.x() + r.width()]
+
+                # 2. GENERATE SEED MASK HERE
+                if crop.size == 0:
+                    dimensions.append(0)
+                    empty_mask = {'mask': np.array([], dtype=bool), 'offset_x': 0, 'offset_y': 0}
+                    if roi_idx == 0:
+                        width_masks_out.append(empty_mask)
+                    else:
+                        thickness_masks_out.append(empty_mask)
+                    continue
+
+                # Generate Seed Mask
+                mask_shape = crop.shape
+                seed_mask = np.zeros(mask_shape, dtype=bool)
+                coords = roi['seed_coords']
+
+                if roi['seed_shape_type'] == 'rect':
+                    start = (coords['y'], coords['x'])
+                    end = (coords['y'] + coords['h'], coords['x'] + coords['w'])
+                    rr, cc = rectangle(start=start, end=end, shape=mask_shape)
+                    seed_mask[rr, cc] = True
+                elif roi['seed_shape_type'] == 'ellipse':
+                    rr, cc = ellipse(coords['center_y'], coords['center_x'],
+                                     coords['radius_y'], coords['radius_x'], shape=mask_shape)
+                    seed_mask[rr, cc] = True
+
+                # 3. PACKAGE THE TINY PAYLOAD
+                payload = {
+                    'crop': crop,
+                    'seed_mask': seed_mask,
+                    'mu': mu, 'gamma': gamma, 'lambda1': lambda1,
+                    'frame_idx': i,
+                    'roi_idx': roi_idx
+                }
+
+                # 4. SUBMIT TO WORKER POOL
+                future = executor.submit(compute_chan_vese_worker, payload)
+                futures.append(future)
+
+                progress_pct = int(((i + 1) / total_frames) * 50)
+                signals.progress.emit(progress_pct)
+
+        signals.message.emit("Processing segmentation masks...")
+
+        # --- CONSUMER LOOP ---
+        completed = 0
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                result = future.result()
+
+                # Route the result to the right storage based on ROI index
+                f_idx = result['frame_idx']
+                if result['roi_idx'] == 0:
+                    width_results[f_idx] = result['mask_data']
                 else:
-                    gray = frame.copy()
+                    thickness_results[f_idx] = result['mask_data']
 
-                cv2.normalize(gray, gray, 0, 255, cv2.NORM_MINMAX)
-                gray = gray.astype(np.uint8)
-                dimensions = []  # Will hold [width_px, length_px]
+                completed += 1
 
-                for roi_idx, roi in enumerate(interp_rois):
-                    # 1. CROP THE IMAGE HERE (In the Manager)
-                    r = roi['roi_rect']
-                    crop = gray[r.y(): r.y() + r.height(), r.x(): r.x() + r.width()]
-
-                    # 2. GENERATE SEED MASK HERE
-                    if crop.size == 0:
-                        dimensions.append(0)
-                        # Ensure we append empty masks to maintain index parity
-                        empty_mask = {'mask': np.array([], dtype=bool), 'offset_x': 0, 'offset_y': 0}
-                        if roi_idx == 0:
-                            width_masks_out.append(empty_mask)
-                        else:
-                            thickness_masks_out.append(empty_mask)
-                        continue
-
-                    # Generate Seed Mask
-                    mask_shape = crop.shape
-                    seed_mask = np.zeros(mask_shape, dtype=bool)
-                    coords = roi['seed_coords']
-
-                    if roi['seed_shape_type'] == 'rect':
-                        start = (coords['y'], coords['x'])
-                        end = (coords['y'] + coords['h'], coords['x'] + coords['w'])
-                        rr, cc = rectangle(start=start, end=end, shape=mask_shape)
-                        seed_mask[rr, cc] = True
-                    elif roi['seed_shape_type'] == 'ellipse':
-                        rr, cc = ellipse(coords['center_y'], coords['center_x'],
-                                         coords['radius_y'], coords['radius_x'], shape=mask_shape)
-                        seed_mask[rr, cc] = True
-
-                    # 3. PACKAGE THE TINY PAYLOAD
-                    payload = {
-                        'crop': crop,
-                        'seed_mask': seed_mask,
-                        'mu': mu, 'gamma': gamma, 'lambda1': lambda1,
-                        'frame_idx': i,
-                        'roi_idx': roi_idx
-                    }
-
-                    # 4. SUBMIT TO WORKER POOL
-                    future = executor.submit(compute_chan_vese_worker, payload)
-                    futures.append(future)
-
-                    progress_pct = int(((i + 1) / total_frames) * 50)
+                if completed % 2 == 0:
+                    frames_processed = completed / 2
+                    progress_pct = 50 + int((frames_processed / total_frames) * 50)
                     signals.progress.emit(progress_pct)
 
-            signals.message.emit("Processing segmentation masks...")
-
-            # --- CONSUMER LOOP ---
-            # Process results as they finish (this handles the progress bar too!)
-            completed = 0
-            for future in concurrent.futures.as_completed(futures):
-                try:
-                    result = future.result()
-
-                    # Route the result to the right storage based on ROI index
-                    f_idx = result['frame_idx']
-                    if result['roi_idx'] == 0:
-                        width_results[f_idx] = result['mask_data']
-                    else:
-                        thickness_results[f_idx] = result['mask_data']
-
-                    completed += 1
-
-                    # Update progress (divide by 2 because there are 2 ROIs per frame)
-                    if completed % 2 == 0:
-                        frames_processed = completed / 2
-                        # Start at 50, and add the remaining 50% based on completion
-                        progress_pct = 50 + int((frames_processed / total_frames) * 50)
-                        signals.progress.emit(progress_pct)
-
-                except Exception as exc:
-                    print(f"Worker generated an exception: {exc}")
+            except Exception as exc:
+                print(f"Worker generated an exception: {exc}")
 
     # Reconstruct the ordered lists from the dictionaries
     width_masks_out = [width_results[i] for i in range(total_frames)]
@@ -483,6 +713,54 @@ def geometry_worker(signals, config: dict):
         'first_masks': width_masks_out,
         'second_masks': thickness_masks_out
     }
+
+def keep_largest_component(mask: np.ndarray, connectivity: int = 8) -> np.ndarray:
+    """
+    Keep only the largest connected foreground object in a binary 2D mask.
+
+    Parameters
+    ----------
+    mask : np.ndarray
+        2D binary array where background is 0 and foreground is nonzero/1.
+    connectivity : int
+        4 or 8. Use 8 if diagonally-touching pixels should count as connected.
+
+    Returns
+    -------
+    largest_mask : np.ndarray
+        Binary 0/1 mask containing only the largest connected foreground object.
+    """
+
+    if mask.ndim != 2:
+        raise ValueError(f"Expected a 2D mask, got shape {mask.shape}")
+
+    if connectivity not in (4, 8):
+        raise ValueError("connectivity must be 4 or 8")
+
+    # Ensure binary uint8 for OpenCV
+    binary = (mask > 0).astype(np.uint8)
+
+    # labels has same shape as mask.
+    # label 0 is background.
+    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
+        binary,
+        connectivity=connectivity
+    )
+
+    # If there are no foreground objects, return an empty mask
+    if num_labels <= 1:
+        return np.zeros_like(binary, dtype=np.uint8)
+
+    # stats[:, cv2.CC_STAT_AREA] gives area of each label
+    # Ignore label 0 because that is background
+    component_areas = stats[1:, cv2.CC_STAT_AREA]
+
+    # +1 because we ignored background label 0
+    largest_label = 1 + np.argmax(component_areas)
+
+    largest_mask = (labels == largest_label).astype(np.uint8)
+
+    return largest_mask
 
 def compute_chan_vese_worker(payload: dict):
     """
@@ -518,6 +796,8 @@ def compute_chan_vese_worker(payload: dict):
     cleaned_mask = cv2.morphologyEx(final_mask * 255, cv2.MORPH_OPEN, KERNEL)
     binary_mask = cleaned_mask // 255
 
+    binary_mask = keep_largest_component(binary_mask)
+
     # --- MASK CROPPING & STORAGE ---
     # Find coordinates of all non-zero pixels
     y_idx, x_idx = np.nonzero(binary_mask)
@@ -547,4 +827,71 @@ def compute_chan_vese_worker(payload: dict):
         'frame_idx': frame_idx,
         'roi_idx': roi_idx,
         'mask_data': mask_data  # dict with 'mask', 'offset_x', 'offset_y'
+    }
+
+
+def _normalize_and_format_mask(mask):
+    """Standalone helper for formatting the mask before writing."""
+    mask = np.array(mask)
+    if mask.max() <= 1.0 and mask.max() > 0:
+        mask = (mask * 255.0)
+    if mask.dtype != np.uint8:
+        mask = mask.astype(np.uint8)
+    if len(mask.shape) == 2:
+        mask = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
+    return mask
+
+
+def video_compiler_worker(signals, config: dict):
+    """Background worker for compiling the thresholded video."""
+    filepath = config['filepath']
+    fps = config['fps']
+    first_segments = config['first_segments']
+    second_segments = config['second_segments']
+
+    signals.message.emit("Compiling threshold video...")
+
+    max_h1, max_h2, max_w = 0, 0, 0
+    for f_item, s_item in zip(first_segments, second_segments):
+        h1, w1 = np.array(f_item['mask']).shape[:2]
+        h2, w2 = np.array(s_item['mask']).shape[:2]
+        if h1 > max_h1: max_h1 = h1
+        if h2 > max_h2: max_h2 = h2
+        if w1 > max_w: max_w = w1
+        if w2 > max_w: max_w = w2
+
+    frame_width = max_w
+    frame_height = max_h1 + max_h2
+    size = (frame_width, frame_height)
+
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    video = cv2.VideoWriter(str(filepath), fourcc, fps, size, True)
+
+    total_frames = len(first_segments)
+    for i, (f_item, s_item) in enumerate(zip(first_segments, second_segments)):
+        mask1 = _normalize_and_format_mask(f_item['mask'])
+        mask2 = _normalize_and_format_mask(s_item['mask'])
+
+        h1, w1 = mask1.shape[:2]
+        h2, w2 = mask2.shape[:2]
+
+        frame = np.zeros((frame_height, frame_width, 3), dtype=np.uint8)
+        frame[0:h1, 0:w1] = mask1
+        frame[max_h1:max_h1 + h2, 0:w2] = mask2
+
+        video.write(frame)
+
+        # Optional: Update progress bar while writing
+        if i % 10 == 0:
+            signals.progress.emit(int((i / total_frames) * 100))
+
+    video.release()
+
+    # Calculate filesize to send back to the UI
+    filesize_bytes = os.path.getsize(filepath)
+    filesize_mb = filesize_bytes / (1024 * 1024)
+
+    return {
+        'filepath': filepath,
+        'filesize_mb': filesize_mb
     }

@@ -117,7 +117,7 @@ class PlotTab(QWidget):
         container.setFrameShape(QFrame.StyledPanel)
         layout = QVBoxLayout(container)
 
-        title_label = QLabel("Optional: Trim data at time:")
+        title_label = QLabel("Optional: Trim data to end time:")
         title_label.setWordWrap(True)  # Allows text to drop to the next line instead of cutting off
         title_label.setStyleSheet("font-weight: bold; font-size: 14px; margin-bottom: 5px;")
         layout.addWidget(title_label)

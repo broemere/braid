@@ -49,7 +49,7 @@ if sys.platform == 'darwin':
         strip=False,
         upx=True,
         console=False,
-        #icon=icon_file,
+        icon=icon_file,
     )
     coll = COLLECT(
         exe,
@@ -63,7 +63,7 @@ if sys.platform == 'darwin':
     app = BUNDLE(
         coll,
         name=f"{app_name}.app", # <-- DYNAMIC
-        #icon=icon_file,
+        icon=icon_file,
         bundle_identifier=None,
     )
 else:
@@ -79,5 +79,5 @@ else:
         strip=False,
         upx=True,
         console=True,
-        #icon=icon_file,
+        icon=icon_file,
     )

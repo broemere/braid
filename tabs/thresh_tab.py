@@ -120,6 +120,7 @@ class ThreshTab(QWidget):
 
         # Pipeline -> UI
         self.pipeline.threshed_images_ready.connect(self.update_displays)
+        self.pipeline.clear_threshold_displays.connect(self.clear_displays)  # NEW
 
     def _on_sliders_moved(self, _=None):
         """Grabs both values, updates UI text, and sends to pipeline."""
@@ -150,3 +151,9 @@ class ThreshTab(QWidget):
             # We no longer manually scale here! We just hand the pixmap
             # to the widget, and it handles the scaling in real-time.
             widget.set_pixmap(pixmap)
+
+    @Slot()
+    def clear_displays(self):
+        """Wipes the threshold images when upstream data changes."""
+        for widget in self.image_widgets:
+            widget.set_pixmap(None)

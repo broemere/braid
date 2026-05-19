@@ -2,11 +2,11 @@ import os
 import logging
 from PySide6.QtCore import Slot, Signal, QEvent, QSettings
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QFrame, QTabWidget, QMessageBox, QApplication, QLineEdit, \
-    QHBoxLayout, QLabel, QSizePolicy
+    QHBoxLayout, QLabel, QSizePolicy, QFileDialog
 from data_pipeline import DataPipeline
 from processing.task_manager import TaskManager
 from widgets.file_picker import FilePickerWidget
-from processing.data_loader import get_system_username
+from processing.data_loader import get_system_username, parse_and_validate_csv
 from tabs.plot_tab import PlotTab
 from tabs.scale_tab import ScaleTab
 from tabs.roi_tab import ROITab
@@ -14,8 +14,11 @@ from tabs.seed_tab import SeedTab
 from tabs.thresh_tab import ThreshTab
 from tabs.geometry_tab import GeometryTab
 from tabs.mechanics_tab import MechanicsTab
+from tabs.last_pull_tab import LastPullTab
 from tabs.relaxation_tab import RelaxationTab
 from tabs.export_tab import ExportTab
+from tabs.voxel_tab import VoxelTab
+from pathlib import Path
 
 
 log = logging.getLogger(__name__)
@@ -128,8 +131,12 @@ class AnalysisWidget(QWidget):
         self.analysis_tabs.addTab(self.thresh_tab, "🏁 Threshold")
         self.geometry_tab = GeometryTab(self.pipeline)
         self.analysis_tabs.addTab(self.geometry_tab, "📊 Geometry")
+        self.voxel_tab = VoxelTab(self.pipeline)
+        self.analysis_tabs.addTab(self.voxel_tab, "🧊 3D View")
         self.mechanics_tab = MechanicsTab(self.pipeline)
         self.analysis_tabs.addTab(self.mechanics_tab, "🧮 Mechanics")
+        self.lastpull_tab = LastPullTab(self.pipeline)
+        self.analysis_tabs.addTab(self.lastpull_tab, "⛓️ Last Pull")
         self.relaxation_tab = RelaxationTab(self.pipeline)
         self.analysis_tabs.addTab(self.relaxation_tab, "⏳ Relaxation")
         self.export_tab = ExportTab(self.pipeline)
@@ -163,21 +170,94 @@ class AnalysisWidget(QWidget):
         self.pipeline.set_scale_is_manual(is_manual)
 
 
-
     @Slot(str)
     def on_file_selected(self, path: str):
         """Handles the selection of a video file for this session."""
         log.info(f"Session received video file path: {path}")
+        file_name = os.path.basename(path)
+        base_name, _ = os.path.splitext(file_name)
+        new_name = base_name.strip("recording_").replace("_video", "").replace("_c","")
+        self.tab_name_requested.emit(new_name)
+        self.file_pickers.set_video_label(path)
+
+        # Only try to resolve CSVs for MKVs. TIFFs handle themselves.
+        if path.lower().endswith(".mkv"):
+            sidecar_data = self.resolve_sidecar_data(path)
+            if not sidecar_data:
+                log.warning("User cancelled data loading or provided invalid data. Aborting video load.")
+                return  # Prevent the crash by stopping here
+
+            # Inject the parsed data directly into the pipeline
+            self.pipeline.data = sidecar_data
+
         self._handle_video_load(path)
 
     def _handle_video_load(self, path: str):
         """Single source of truth for loading a video file within this session."""
         log.info(f"Loading Video {path} for session.")
         self.pipeline.load_video_file(path)
-        self.file_pickers.set_video_label(path)
-        file_name = os.path.basename(path)
-        base_name, _ = os.path.splitext(file_name)
-        self.tab_name_requested.emit(base_name.strip("_video").strip("recording_"))
+
+
+    def resolve_sidecar_data(self, video_path: str) -> dict | None:
+        """Attempts to automatically load sidecar data, falling back to a user prompt."""
+        p = Path(video_path)
+
+        # 1. Automatic Discovery
+        stems = [
+            p.stem.replace("_video_c", "_force"),
+            p.stem.replace("_video", "_force"),
+        ]
+
+        # New Case: Strip everything from "_video" onward and append "_force"
+        # Example: "test_video_custom_suffix" -> "test_force"
+        if "_video" in p.stem:
+            stems.append(f"{p.stem.split('_video')[0]}_force")
+
+        stems.append(p.stem)  # Fallback to exact same name
+
+        stems = list(dict.fromkeys(stems))
+
+        csv_path = None
+        for stem in stems:
+            candidate = p.with_stem(stem).with_suffix(".csv")
+            if candidate.exists():
+                csv_path = candidate
+                break
+
+        # 2. Validation
+        data = None
+        if csv_path:
+            log.info(f"Found matching CSV: {csv_path}")
+            data = parse_and_validate_csv(csv_path)
+
+        # 3. Prompt User if Missing or Invalid
+        if not data:
+            log.warning("Valid CSV not found automatically. Prompting user.")
+            reply = QMessageBox.warning(
+                self,
+                "Data File Missing",
+                "Could not automatically locate a valid sidecar csv file for this video.\nWould you like to locate it manually?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes
+            )
+
+            if reply == QMessageBox.Yes:
+                manual_path, _ = QFileDialog.getOpenFileName(
+                    self,
+                    "Select CSV Data File",
+                    str(p.parent),
+                    "CSV Files (*.csv)"
+                )
+
+                if manual_path:
+                    data = parse_and_validate_csv(Path(manual_path))
+                    if not data:
+                        QMessageBox.critical(self, "Invalid Data",
+                                             "The selected CSV does not contain the required columns.")
+
+        return data
+
+
 
     # --- SLOTS FOR SAVING ---
 

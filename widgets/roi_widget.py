@@ -38,7 +38,7 @@ class ROICanvas(QGraphicsView):
         self._preview_rect_item: QGraphicsRectItem | None = None
 
         # --- Drawing Styles ---
-        self.active_pen = QPen(QColor(Qt.red), 1, Qt.DashLine)
+        self.active_pen = QPen(QColor(Qt.red), 2, Qt.DashLine)
         self.active_pen.setCosmetic(True)  # Prevents line scaling when zooming
 
         self.completed_pen = QPen(QColor(Qt.green), 2)

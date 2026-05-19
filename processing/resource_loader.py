@@ -66,40 +66,6 @@ def resource_path(relative_path: str) -> str:
 
     return os.path.join(base_path, relative_path)
 
-
-def load_cursor(name: str, hot_x: int, hot_y: int) -> QCursor:
-    """
-    Loads “name.png” or “name@2x.png” from resources/cursors,
-    picks based on primary screen DPI, and returns a QCursor.
-    Must be called after QApplication() exists.
-    """
-    app = QApplication.instance()
-    if app is None:
-        raise RuntimeError("Call load_cursor() only after QApplication() is created")
-
-    scale = app.primaryScreen().devicePixelRatio()
-    suffix = "@2x" if scale >= 2.0 else ""
-
-    path_to_resource = os.path.join("resources", f"{name}{suffix}.png")
-    absolute_path = resource_path(path_to_resource)
-    if not os.path.exists(absolute_path):
-        path_to_resource = os.path.join("resources", f"{name}.png")
-        absolute_path = resource_path(path_to_resource)
-        print("Retina cursors not found, defaulting to standard cursors")
-
-    pix = QPixmap(absolute_path)
-    # Only do a smooth resize on non-integer scales (e.g. 1.5, 2.25)
-    if not scale.is_integer():
-        pix = pix.scaled(
-            int(pix.width() * scale),
-            int(pix.height() * scale),
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation
-        )
-    # Tag the pixmap so Qt treats its logical size correctly
-    pix.setDevicePixelRatio(scale)
-    return QCursor(pix, int(hot_x * scale), int(hot_y * scale))
-
 def load_icon():
     if sys.platform == 'darwin':  # macOS
         icon_filename = 'app.icns'

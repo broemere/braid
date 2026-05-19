@@ -1,7 +1,7 @@
 from PySide6.QtCore import Qt, Slot
 from PySide6.QtWidgets import QWidget, QBoxLayout, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QButtonGroup, QRadioButton
 from widgets.seed_widget import SeedDrawingLabel
-
+from widgets.error_bus import user_error  # Adjust path if necessary based on your file structure
 
 class SeedTab(QWidget):
     def __init__(self, pipeline, parent=None):
@@ -98,8 +98,45 @@ class SeedTab(QWidget):
             editor.set_tool(tool)
 
     def _on_shape_drawn(self, index, shape_type, data):
-        """Passes the drawn shape data back to the pipeline."""
+        """Passes the drawn shape data back to the pipeline after validating pairs."""
         print(f"Shape drawn on Image {index}: {shape_type}, {data}")
+
+        # --- Validation Logic ---
+        # We only validate if the user actually drew a shape (shape_type is not None)
+        # and if we have all 4 editors initialized.
+        if shape_type is not None and len(self.editors) == 4:
+
+            # Fetch current shapes directly from the widgets
+            shape0 = self.editors[0].drawn_shape_type
+            shape1 = self.editors[1].drawn_shape_type
+            shape2 = self.editors[2].drawn_shape_type
+            shape3 = self.editors[3].drawn_shape_type
+
+            # Check Pair 1 (Index 0 and 2 / Editors 1 and 3)
+            if index in (0, 2) and shape0 and shape2 and shape0 != shape2:
+                user_error(
+                    "Invalid Seed Shape Match",
+                    f"Editor 1 and Editor 3 must use the same shape type.\n\n"
+                    f"Editor 1 has: '{shape0}'\n"
+                    f"Editor 3 has: '{shape2}'\n\n"
+                    "Your last drawing has been undone."
+                )
+                self.editors[index].undo()  # Reject the bad draw
+                return  # Do not pass data to pipeline
+
+            # Check Pair 2 (Index 1 and 3 / Editors 2 and 4)
+            if index in (1, 3) and shape1 and shape3 and shape1 != shape3:
+                user_error(
+                    "Invalid Seed Shape Match",
+                    f"Editor 2 and Editor 4 must use the same shape type.\n\n"
+                    f"Editor 2 has: '{shape1}'\n"
+                    f"Editor 4 has: '{shape3}'\n\n"
+                    "Your last drawing has been undone."
+                )
+                self.editors[index].undo()  # Reject the bad draw
+                return  # Do not pass data to pipeline
+
+        # If validation passes (or if it was an undo action), send to pipeline
         self.pipeline.receive_seed_shape(index, shape_type, data)
 
     @Slot(list)
@@ -116,3 +153,4 @@ class SeedTab(QWidget):
             else:
                 # Clear editor if we have fewer crops than slots
                 editor.set_pixmap(None)
+                editor.setEnabled(False)  # Disable if empty

@@ -31,6 +31,13 @@ class SeedDrawingLabel(QWidget):
         self.scale_factor = 1.0
 
     def set_pixmap(self, pixmap):
+        # CASCADE: If the underlying image changes (or is cleared),
+        # any previously drawn shape is now mathematically invalid.
+        self.has_shape = False
+        self.start_point = None
+        self.end_point = None
+        self.drawn_shape_type = None
+
         if pixmap is None:
             self.original_pixmap = None
             self.update()

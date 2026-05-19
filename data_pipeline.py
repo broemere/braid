@@ -4,9 +4,9 @@ import json
 import logging
 import numpy as np
 from pathlib import Path
-from PySide6.QtCore import QObject, Signal, Slot
+from PySide6.QtCore import QObject, Signal, Slot, QTimer
 #from processing.data_transform import zero_data, smooth_data, label_image, create_visual_from_labels, convert_numpy, restore_numpy, n_closest_numbers
-from processing.data_loader import frame_loader, geometry_worker
+from processing.data_loader import frame_loader, geometry_worker, keep_largest_component, video_compiler_worker
 from processing.data_transform import auto_thresh
 from config import APP_VERSION
 from widgets.error_bus import user_error
@@ -19,6 +19,7 @@ from skimage.segmentation import chan_vese
 from skimage.draw import disk, ellipse, rectangle
 from scipy.signal import savgol_filter
 from scipy.optimize import curve_fit
+from scipy.stats import linregress
 
 
 log = logging.getLogger(__name__)
@@ -54,11 +55,17 @@ class DataPipeline(QObject):
     cropped_images_ready = Signal(list)
     seed_masks_ready = Signal(dict)
     threshed_images_ready = Signal(list)
+    clear_threshold_displays = Signal()
 
     dimension_images_ready = Signal(np.ndarray, np.ndarray)
 
     geometry_available = Signal(dict)
+    video_compiled_ready = Signal(str)
     mechanics_available = Signal(dict)
+
+    last_pull_available = Signal(dict)
+
+    voxels_available = Signal(object)
 
     relaxation_available = Signal(dict)
 
@@ -113,6 +120,7 @@ class DataPipeline(QObject):
         self.thickness_roi_idx = 1
 
         self.layout = "vertical"
+        self.voxel_arrays = []
 
     @Slot(float, object)
     def set_trimmed_data(self, trim_time: float, trimmed_data: np.ndarray):
@@ -156,20 +164,42 @@ class DataPipeline(QObject):
         if not result:
             log.warning("Frame loader returned no frames.")
             return
+
         it = iter(result)
         first_frame_index = next(it)
         self.left_image = result[first_frame_index]
+
         if self.left_image is None:
             log.error("Did not receive left frame")
         self.left_image_changed.emit(self.left_image)
+
         self.frame_count = next(it)
         log.info(f"Frame count found: {self.frame_count}")
-        log.info(f"Data keys: {result['data'].keys()}")
-        log.info(f"Data found: {result['data']}")
-        self.data = result["data"]
+
+        # Safely handle data: TIFF embedded data will be here, MKV data won't.
+        worker_data = result.get("data")
+        if worker_data is not None:
+            log.info("Using embedded data from frame loader.")
+            self.data = worker_data
+
+        # Failsafe check
+        if not hasattr(self, "data") or not self.data:
+            log.error("No telemetry data available! Pipeline cannot proceed.")
+            return
+
+        # From here down, self.data is guaranteed to exist and have the right columns
+        log.info(f"Data keys available: {self.data.keys()}")
         self.max_distance_index = np.argmax(self.data["distance"])
         self.min_distance_index = np.argmin(self.data["distance"])
         self.data_available.emit(self.data)
+        if len([i for i, x in enumerate(self.data["cycle"]) if x == np.max(self.data['cycle'])]) < 5:
+            self.last_cycle = np.max(self.data["cycle"]) - 1
+        else:
+            self.last_cycle = np.max(self.data["cycle"])
+        print("Last cycle:", self.last_cycle)
+        print("Hz:", np.mean(np.gradient(self.data["time_s"])))
+        self.fps = int(round(1/np.mean(np.gradient(self.data["time_s"]))))
+        print("FPS:", self.fps)
         self.load_frames([self.max_distance_index, self.min_distance_index])
 
     def load_frames(self, index):
@@ -365,6 +395,8 @@ class DataPipeline(QObject):
         # 2. Generate crops and store them directly inside the nested dict
         self._generate_crops_for_target(target)
 
+        self.clear_threshold_displays.emit()
+
         # 3. Gather all valid crops in order (Min first, then Max) to send to UI
         crops_pixmaps = []
         for t in ['min', 'max']:
@@ -413,6 +445,7 @@ class DataPipeline(QObject):
             roi_dict["seed_coords"] = None
             roi_dict["seed_mask"] = None
             print(f"Mask cleared for image {index} ({target} ROI {sub_index})")
+            self.clear_threshold_displays.emit()
             return
 
         # 4. Generate the Mask
@@ -447,6 +480,9 @@ class DataPipeline(QObject):
 
         if len(valid_masks) == 4:
             self.seed_masks_ready.emit(valid_masks)
+        else:
+            # CASCADE: If we have less than 4 masks, we can't threshold.
+            self.clear_threshold_displays.emit()
 
     # endregion
 
@@ -471,6 +507,8 @@ class DataPipeline(QObject):
         # final_energies = cv_result[2]  # To check convergence
         raw_mask = final_mask.astype(np.uint8) * 255
         cleaned_mask = cv2.morphologyEx(raw_mask, cv2.MORPH_OPEN, KERNEL)
+
+        cleaned_mask = keep_largest_component(cleaned_mask) * 255
 
         return cleaned_mask
 
@@ -742,15 +780,55 @@ class DataPipeline(QObject):
         self.first_segments = result["first_masks"]
         self.second_segments = result["second_masks"]
         self.calculate_dimensions()
+        # 1. Extract the base filename without extensions or trailing tags
+        filename = os.path.splitext(os.path.basename(self.video))[0].strip("recording_")
+        filename = filename.replace("_video", "")
+        filename = filename.replace("_c","")
+        # 2. Define the new cross-platform path: User's Home Directory -> Documents -> Braid
+        braid_dir = Path.home() / "Documents" / "Braid"
+        # 3. Safely create the directory (does nothing if it already exists)
+        braid_dir.mkdir(parents=True, exist_ok=True)
+        # 4. Construct the final output filepath
+        filepath = braid_dir / f"{filename}_threshold.mp4"
+        # 5. Compile the video
+        # Package config for the background task
+        snapshot_config = {
+            'filepath': filepath,
+            'fps': getattr(self, 'fps', 20),
+            'first_segments': self.first_segments,
+            'second_segments': self.second_segments
+        }
+
+        # Queue the video writer
+        self.task_manager.queue_task(
+            video_compiler_worker,
+            snapshot_config,
+            on_result=self._on_video_compiled
+        )
+
+    def _on_video_compiled(self, result: dict):
+        """Callback for when the video background task completes."""
+        path = result['filepath']
+        size_mb = result['filesize_mb']
+        # Construct the friendly message
+        msg = f"Ready - Finished writing threshed video to {path} ({size_mb:.2f} MB)"
+        # Delay the emission by 100ms so it overwrites the TaskManager's default 'Ready' reset
+        QTimer.singleShot(100, lambda: self.task_manager.status_updated.emit(msg))
+        print(f"Video compiled successfully: {msg}")
+
+        directory_path = str(Path(path).parent)
+        self.video_compiled_ready.emit(directory_path)
 
 
     # endregion
 
+    # region DIMENSIONAL DATA GENERATION
+
     def calculate_dimensions(self):
         """
         Calculates X, Y, and Z dimensions from the stored segmentation masks.
-        Calculates the Y-Z cross-sectional area (normal to the X stretching direction).
-        Emits the final data payload to the GeometryTab.
+        Calculates the true Y-Z cross-sectional area (3D Voxels).
+        Caches both raw and smoothed data for instant UI toggling.
         """
         if not hasattr(self, 'first_segments') or not hasattr(self, 'second_segments'):
             print("No segmentation data available to calculate dimensions.")
@@ -762,9 +840,11 @@ class DataPipeline(QObject):
         raw_x = []
         raw_y = []
         raw_z = []
+        self.voxel_arrays = []
+        areas = []
+        min_areas = []
+        volumes = []
 
-        # 1. Map the ROIs to the XY image and the Z image
-        # Assuming xy_roi_idx tracks the first image (XY Orientation)
         if self.xy_roi_idx == 0:
             xy_masks_list = self.first_segments
             z_masks_list = self.second_segments
@@ -781,13 +861,10 @@ class DataPipeline(QObject):
             # --- XY Image Processing ---
             xy_mask = xy_masks_list[i]['mask']
             if xy_mask.size > 0:
-                # X Measure: Horizontal sum (across columns -> axis=1)
                 x_sums = np.sum(xy_mask, axis=1)
                 valid_x = x_sums[x_sums > 0]
                 raw_x.append(np.max(valid_x) if len(valid_x) > 0 else 0)
-                #raw_x.append(np.mean(valid_x) if len(valid_x) > 0 else 0)
 
-                # Y Measure: Vertical sum (across rows -> axis=0)
                 y_sums = np.sum(xy_mask, axis=0)
                 valid_y = y_sums[y_sums > 0]
                 raw_y.append(np.mean(valid_y) if len(valid_y) > 0 else 0)
@@ -798,50 +875,126 @@ class DataPipeline(QObject):
             # --- Z Image Processing ---
             z_mask = z_masks_list[i]['mask']
             if z_mask.size > 0:
-                # Z Measure: Vertical sum (across rows -> axis=0)
                 z_sums = np.sum(z_mask, axis=0)
                 valid_z = z_sums[z_sums > 0]
                 raw_z.append(np.mean(valid_z) if len(valid_z) > 0 else 0)
             else:
                 raw_z.append(0)
 
-        # 2. Convert to real-world units (mm)
+            h, w = xy_mask.shape
+            h2, w2 = z_mask.shape
+            new_h = int(round((w / w2) * h2))
+            xy_mask_bool = xy_mask.astype(bool)
+
+            z_mask_scaled = cv2.resize(
+                z_mask.astype(np.uint8),
+                (w, new_h),
+                interpolation=cv2.INTER_NEAREST
+            ).astype(bool)
+            xyz_mask = np.zeros((h, w, new_h), dtype=bool)
+            xyz_mask[:] = xy_mask_bool[:, :, None]
+            xyz_mask &= z_mask_scaled.T[None, :, :]
+            self.voxel_arrays.append(xyz_mask)
+            # --- Cross-Sectional Area Calculations ---
+            # 1D array of areas for each slice along the stretch axis
+            slice_areas = np.sum(xyz_mask, axis=(0, 2))
+
+            # 1. Mean Area (Original)
+            areas.append(np.mean(slice_areas))
+            #min_areas.append(np.min(np.sum(xyz_mask, axis=(0, 2)))) # Poor min method, fixates on end effects
+            # 2. Min Area (Middle 50% Spatial Slice)
+            active_indices = np.nonzero(slice_areas)[0]
+
+            if len(active_indices) > 0:
+                first_idx = active_indices[0]
+                last_idx = active_indices[-1]
+                active_length = last_idx - first_idx + 1
+
+                # Shave 25% off both the front and the back to look only at the middle 50%
+                start_trim = first_idx + int(active_length * 0.25)
+                end_trim = first_idx + int(active_length * 0.75)
+
+                # Safeguard in case the object is only a few pixels long
+                if start_trim < end_trim:
+                    trimmed_areas = slice_areas[start_trim:end_trim]
+                    min_areas.append(np.min(trimmed_areas))
+                else:
+                    # Fallback to the absolute min of the active volume if it's super short
+                    min_areas.append(np.min(slice_areas[active_indices]))
+            else:
+                min_areas.append(0)
+
+            volumes.append(np.sum(xyz_mask))
+
+        areas_mm = np.array(areas) / (cf ** 2)
+        min_areas_mm = np.array(min_areas) / (cf ** 2)
+        volumes_mm3 = np.array(volumes) / (cf ** 3)
+        self.voxels_available.emit(self.voxel_arrays)
+
+        # Convert to real-world units (mm)
         x_mm = np.array(raw_x) / cf
         y_mm = np.array(raw_y) / cf
         z_mm = np.array(raw_z) / cf
 
-        # 3. Calculate Load-Bearing Cross-Sectional Area (Y-Z Plane)
-        raw_areas = y_mm * z_mm
+        # --- Store Raw Data ---
+        self._raw_geometry = {
+            'frames': frames,
+            'dim_x': x_mm.tolist(),
+            'dim_y': y_mm.tolist(),
+            'dim_z': z_mm.tolist(),
+            'area': areas_mm.tolist(),
+            'min_area': min_areas_mm.tolist(),
+            'volume': volumes_mm3.tolist()
+        }
 
-        # 4. Setup Savitzky-Golay Smoothing
+        # --- Setup & Apply Smoothing ---
         calc_window = int(len(frames) * 0.05)
         window_length = max(5, calc_window if calc_window % 2 != 0 else calc_window + 1)
 
-        # 5. Apply Smoothing to all arrays
         if window_length > 3 and len(frames) >= window_length:
             from scipy.signal import savgol_filter
-            # Explicitly setting mode='nearest' to prevent polynomial boundary wiggles
             smooth_x = savgol_filter(x_mm, window_length=window_length, polyorder=3, mode='nearest')
             smooth_y = savgol_filter(y_mm, window_length=window_length, polyorder=3, mode='nearest')
             smooth_z = savgol_filter(z_mm, window_length=window_length, polyorder=3, mode='nearest')
-            smooth_area = savgol_filter(raw_areas, window_length=window_length, polyorder=3, mode='nearest')
+            smooth_area = savgol_filter(areas_mm, window_length=window_length, polyorder=3, mode='nearest')
+            smooth_min_area = savgol_filter(min_areas_mm, window_length=window_length, polyorder=3, mode='nearest')
+            smooth_volume = savgol_filter(volumes_mm3, window_length=window_length, polyorder=3, mode='nearest')
         else:
-            smooth_x, smooth_y, smooth_z, smooth_area = x_mm, y_mm, z_mm, raw_areas
+            smooth_x, smooth_y, smooth_z, smooth_area, smooth_min_area = x_mm, y_mm, z_mm, areas_mm, min_areas_mm, volumes_mm3
 
-        # 6. Package and Emit
-        result = {
+        # --- Store Smoothed Data ---
+        self._smoothed_geometry = {
             'frames': frames,
             'dim_x': smooth_x.tolist(),
             'dim_y': smooth_y.tolist(),
             'dim_z': smooth_z.tolist(),
-            'area': smooth_area.tolist()
+            'area': smooth_area.tolist(),
+            'min_area': smooth_min_area.tolist(),
+            'volume': smooth_volume.tolist()
         }
 
-        self.geometry_available.emit(result)
-        print("XYZ Dimensions calculated and emitted to UI.")
+        print("XYZ Dimensions calculated. Dispatching data...")
+        self._dispatch_geometry()
 
-        # Save the payload so the mechanics function can use it
-        self.geometry_data = result
+    @Slot(bool)
+    def set_smoothing_enabled(self, enabled: bool):
+        """Toggles smoothing without recalculating image masks."""
+        self.use_smoothing = enabled
+        print(f"Geometry smoothing enabled: {self.use_smoothing}")
+        # Only dispatch if we actually have data stored
+        if hasattr(self, '_raw_geometry') and hasattr(self, '_smoothed_geometry'):
+            self._dispatch_geometry()
+
+    def _dispatch_geometry(self):
+        """Selects the correct dataset and pushes it to the UI and downstream tabs."""
+        if getattr(self, 'use_smoothing', True):
+            self.geometry_data = self._smoothed_geometry
+        else:
+            self.geometry_data = self._raw_geometry
+
+        self.geometry_available.emit(self.geometry_data)
+
+        # Cascade the new data through the remaining tabs
         self.calculate_mechanics()
         self.calculate_relaxation()
 
@@ -863,6 +1016,8 @@ class DataPipeline(QObject):
         dim_y = np.array(geom['dim_y'])  # Optical longitudinal unloaded direction
         dim_z = np.array(geom['dim_z'])  # Optical transverse unloaded direction
         area = np.array(geom['area'])  # Cross-section normal to X (Y * Z)
+        min_area = np.array(geom['min_area'])  # Minimum cross-section (Bottleneck)
+        volume = np.array(geom['volume'])  # Total 3D voxel volume
         force_mN = self.data_trimmed['force']
         if "2026-02-05" in str(self.video):  # Quirk for backwards load cell data
             force_mN = -force_mN
@@ -879,6 +1034,8 @@ class DataPipeline(QObject):
         dim_y = dim_y[:min_len]
         dim_z = dim_z[:min_len]
         area = area[:min_len]
+        min_area = min_area[:min_len]
+        volume = volume[:min_len]
 
         force_mN = force_mN[:min_len]
         machine_x = machine_x[:min_len]
@@ -890,19 +1047,26 @@ class DataPipeline(QObject):
         Y0 = np.mean(dim_y[:3]) if np.mean(dim_y[:3]) != 0 else 1e-6
         Z0 = np.mean(dim_z[:3]) if np.mean(dim_z[:3]) != 0 else 1e-6
         A0 = np.mean(area[:3]) if np.mean(area[:3]) != 0 else 1e-6
+        Min_A0 = np.mean(min_area[:3]) if np.mean(min_area[:3]) != 0 else 1e-6
+        V0 = np.mean(volume[:3]) if np.mean(volume[:3]) != 0 else 1e-6
         X0_mech = np.mean(machine_x[:3]) if np.mean(machine_x[:3]) != 0 else 1e-6
 
         # 3. Continuous Array Math
 
         # Stress calculations (kPa = mN / mm^2)
         true_stress_kpa = force_mN / area
+        true_stress_max_kpa = force_mN / min_area
         eng_stress_kpa = force_mN / A0
+        eng_stress_max_kpa = force_mN / Min_A0
 
         # Stretch Ratios (Lambda)
         stretch_x_opt = dim_x_opt / X0_opt
         stretch_y = dim_y / Y0
         stretch_z = dim_z / Z0
         stretch_x_mech = machine_x / X0_mech
+
+        # Volumetric Ratio (J) - Incompressibility check
+        volumetric_ratio = volume / V0
 
         # Logarithmic (True) Strain (epsilon = ln(lambda))
         true_strain_x_opt = np.log(stretch_x_opt)
@@ -937,7 +1101,7 @@ class DataPipeline(QObject):
 
             # We use the mechanical strain for the integral to prevent pixel noise
             # from causing artificial energy loops
-            c_strain = true_strain_x_opt[idx]
+            c_strain = true_strain_x_mech[idx]
             c_stress = true_stress_kpa[idx]
             c_dist = machine_x[idx]
 
@@ -981,7 +1145,9 @@ class DataPipeline(QObject):
         mechanics_payload = {
             'time_s': time_s.tolist(),
             'true_stress_kpa': true_stress_kpa.tolist(),
+            'true_stress_max_kpa': true_stress_max_kpa.tolist(),
             'eng_stress_kpa': eng_stress_kpa.tolist(),
+            'eng_stress_max_kpa': eng_stress_max_kpa.tolist(),
 
             # Export all strain variants
             'strain_x_opt': true_strain_x_opt.tolist(),
@@ -995,6 +1161,7 @@ class DataPipeline(QObject):
             'stretch_y': stretch_y.tolist(),
             'stretch_z': stretch_z.tolist(),
 
+            'volumetric_ratio': volumetric_ratio.tolist(),
             'poissons_ratio_zx': poissons_ratio_zx.tolist(),
             'poissons_ratio_yx': poissons_ratio_yx.tolist(),
             'energy_dissipated': energy_dissipated,
@@ -1004,6 +1171,241 @@ class DataPipeline(QObject):
         self.mechanics_payload = mechanics_payload
         self.mechanics_available.emit(mechanics_payload)
         print("Biomechanics calculated and emitted!")
+
+    def calculate_last_pull(self, ref_mode="cycle_start", manual_length=0.0, preload_force=0.0, cutoff_stretch=0.0):
+        """
+        Slices the last cycle's loading curve (up to max force) and calculates
+        stretch dynamically based on the requested reference length mode.
+        """
+        log.info(f"Pipeline: calculate_last_pull triggered (mode={ref_mode})")
+
+        # Failsafe: Check if geometry data exists
+        if getattr(self, 'geometry_data', None) is None:
+            log.warning("Pipeline: calculate_last_pull aborted -> geometry_data is None")
+            return
+
+        # Failsafe: Fallback to raw data if data_trimmed isn't available yet
+        source_data = getattr(self, 'data_trimmed', None)
+        if source_data is None:
+            source_data = getattr(self, 'data', None)
+
+        if source_data is None:
+            log.warning("Pipeline: calculate_last_pull aborted -> both data_trimmed and data are None")
+            return
+
+        try:
+            geom = self.geometry_data
+            dim_x_opt = np.array(geom['dim_x'])
+            area = np.array(geom['area'])
+
+            force_mN = source_data['force']
+            cycle_flags = source_data['cycle']
+
+            # Quirk for backwards load cell data
+            if "2026-02-05" in str(self.video):
+                force_mN = -force_mN
+
+        except KeyError as e:
+            log.error(f"Pipeline: calculate_last_pull aborted -> Missing expected key: {e}")
+            return
+
+        # Failsafe alignment
+        min_len = min(len(dim_x_opt), len(force_mN))
+        if min_len == 0:
+            log.warning("Pipeline: calculate_last_pull aborted -> Data arrays are empty")
+            return
+
+        dim_x_opt = dim_x_opt[:min_len]
+        force_mN = force_mN[:min_len]
+        cycle_flags = cycle_flags[:min_len]
+        area = area[:min_len]
+
+        # --- UPDATED: Identify the effective "Last Cycle" ---
+        unique_cycles = np.unique(cycle_flags)
+        if len(unique_cycles) == 0:
+            log.warning("Pipeline: calculate_last_pull aborted -> No cycles found in data")
+            return
+
+        valid_cycle_found = False
+
+        # Iterate backwards to find the first cycle with enough data points
+        for cycle_candidate in reversed(unique_cycles):
+            cycle_mask = (cycle_flags == cycle_candidate)
+            cycle_indices = np.where(cycle_mask)[0]
+
+            # We require at least 5 points to confidently establish a loading curve and a peak
+            if len(cycle_indices) >= 5:
+                last_cycle = cycle_candidate
+                last_cycle_indices = cycle_indices
+                valid_cycle_found = True
+                log.debug(
+                    f"Pipeline: Isolating effective last cycle -> Cycle {last_cycle} ({len(cycle_indices)} points)")
+                break
+            else:
+                log.info(
+                    f"Pipeline: Skipping Cycle {cycle_candidate} (only {len(cycle_indices)} points). Checking previous...")
+
+        if not valid_cycle_found:
+            log.warning("Pipeline: calculate_last_pull aborted -> No cycle with sufficient data points found.")
+            return
+        # ----------------------------------------------------
+
+        # 2. Extract the raw "Last Pull" data (Start of last cycle up to max force)
+        lc_force = force_mN[last_cycle_indices]
+        peak_relative_idx = np.argmax(lc_force)
+
+        pull_indices = last_cycle_indices[:peak_relative_idx + 1]
+        raw_pull_dim_x = dim_x_opt[pull_indices]
+        raw_pull_force = force_mN[pull_indices]
+        raw_pull_area = area[pull_indices]
+
+        # 3. Determine Reference Length (X₀) and Slicing Index
+        X0 = 1.0
+        slice_idx = 0  # Default to no slice (start of cycle)
+
+        if ref_mode == "global_start":
+            X0 = dim_x_opt[0]
+            # slice_idx remains 0
+
+        elif ref_mode == "cycle_start":
+            X0 = raw_pull_dim_x[0]
+            # slice_idx remains 0
+
+        elif ref_mode == "manual":
+            X0 = manual_length
+            # If manual length is within or below the data range, slice it!
+            # np.argmax returns the FIRST True value, meaning the exact point it crosses the length
+            if np.any(raw_pull_dim_x >= X0):
+                slice_idx = int(np.argmax(raw_pull_dim_x >= X0))
+            else:
+                # If manual length is vastly larger than the data, don't slice,
+                # just let it plot normally (stretch will just be plotted < 1.0)
+                slice_idx = 0
+
+        elif ref_mode == "preload":
+            preload_mask = raw_pull_force >= preload_force
+            if np.any(preload_mask):
+                slice_idx = int(np.argmax(preload_mask))
+                X0 = raw_pull_dim_x[slice_idx]
+                log.debug(f"Pipeline: Preload reached at local index {slice_idx}")
+            else:
+                log.warning(
+                    f"Pipeline: Preload force {preload_force} mN never reached. Falling back to cycle start.")
+                X0 = raw_pull_dim_x[0]
+                slice_idx = 0
+
+        # Prevent divide-by-zero
+        if X0 <= 0:
+            log.warning(f"Pipeline: Calculated X₀ was {X0}. Clamping to 1e-6 to prevent DivisionByZero.")
+            X0 = 1e-6
+
+        # 4. Slice the arrays from the determined start point to the peak
+        pull_dim_x = raw_pull_dim_x[slice_idx:]
+        pull_force = raw_pull_force[slice_idx:]
+        pull_area = raw_pull_area[slice_idx:]
+
+        log.debug(f"Pipeline: Final applied X₀ = {X0:.3f}, sliced {slice_idx} earlier points.")
+
+        # 5. Calculate Responsive Metrics
+        stretch = pull_dim_x / X0
+        stress = pull_force / pull_area
+
+        # --- Enforce Strictly Increasing Monotonicity ---
+        if len(stretch) > 1:
+            keep_mask = np.ones(len(stretch), dtype=bool)
+            current_max = stretch[0]
+
+            for i in range(1, len(stretch)):
+                if stretch[i] > current_max:
+                    current_max = stretch[i]
+                else:
+                    keep_mask[i] = False
+
+            stretch = stretch[keep_mask]
+            stress = stress[keep_mask]
+
+            points_removed = np.sum(~keep_mask)
+            if points_removed > 0:
+                log.info(f"Pipeline: Monotonicity filter removed {points_removed} noisy optical points.")
+
+        # --- NEW: Determine the Split Index (Cutoff) ---
+        max_points = len(stretch)
+
+        # If user hasn't set a cutoff (0.0) or it's out of bounds, default to the middle
+        if cutoff_stretch <= 0.0 or not np.any(stretch >= cutoff_stretch):
+            cutoff_idx = max_points // 2
+            applied_cutoff = float(stretch[cutoff_idx]) if max_points > 0 else 1.0
+        else:
+            cutoff_idx = int(np.argmax(stretch >= cutoff_stretch))
+            applied_cutoff = cutoff_stretch
+
+        # Failsafe: Ensure the cutoff leaves at least 5 points for both sides if possible
+        if cutoff_idx < 5:
+            cutoff_idx = min(5, max_points // 2)
+        if (max_points - cutoff_idx) < 5:
+            cutoff_idx = max(max_points - 5, max_points // 2)
+
+        log.debug(f"Pipeline: Split data at index {cutoff_idx} (λ ≈ {applied_cutoff:.3f})")
+
+        # --- UPDATED: Iterative Linearized Stiffness Calculations ---
+        # Added 'max_search_points' to strictly limit how far the algorithm can look
+        def fit_linear_region(x_arr, y_arr, max_search_points, reverse=False):
+            min_n = min(5, len(x_arr), max_search_points)
+            search_limit = max(min_n, max_search_points)
+
+            best_r2 = -1.0
+            n_best = min_n
+            m_best = 0.0
+            b_best = 0.0
+
+            if len(x_arr) >= min_n:
+                for n in range(min_n, search_limit + 1):
+                    s_slice = x_arr[-n:] if reverse else x_arr[:n]
+                    y_slice = y_arr[-n:] if reverse else y_arr[:n]
+
+                    slope, intercept, r_value, p_value, std_err = linregress(s_slice, y_slice)
+                    r_sq = r_value ** 2
+
+                    if r_sq > best_r2:
+                        best_r2 = r_sq
+                        n_best = n
+                        m_best = slope
+                        b_best = intercept
+
+                lam_val = x_arr[-n_best] if reverse else x_arr[n_best - 1]
+                sig_val = y_arr[-n_best] if reverse else y_arr[n_best - 1]
+
+                return n_best, m_best, b_best, float(lam_val), float(sig_val)
+            else:
+                return 0, 0.0, 0.0, 0.0, 0.0
+
+        # Execute fits using the cutoff index to define boundaries
+        n0, E0, b0, lam0, sig0 = fit_linear_region(stretch, stress, max_search_points=cutoff_idx, reverse=False)
+        n1, E1, b1, lam1, sig1 = fit_linear_region(stretch, stress, max_search_points=(max_points - cutoff_idx),
+                                                   reverse=True)
+
+        # Calculate Intersection (λ_m, σ_m)
+        if abs(E0 - E1) > 1e-6:
+            lam_m = (b1 - b0) / (E0 - E1)
+            sig_m = E0 * lam_m + b0
+        else:
+            lam_m, sig_m = float('nan'), float('nan')
+
+        # Emit payload to the UI (Now includes 'applied_cutoff')
+        payload = {
+            'stretch': stretch.tolist(),
+            'stress': stress.tolist(),
+            'ref_length': float(X0),
+            'applied_cutoff': float(applied_cutoff),
+            'stiffness': {
+                'initial': {'n': n0, 'E': E0, 'b': b0, 'lambda': lam0, 'sigma': sig0},
+                'terminal': {'n': n1, 'E': E1, 'b': b1, 'lambda': lam1, 'sigma': sig1},
+                'intersect': {'lambda': lam_m, 'sigma': sig_m}
+            }
+        }
+
+        log.info("Pipeline: calculate_last_pull emitting successfully.")
+        self.last_pull_available.emit(payload)
 
     def calculate_relaxation(self):
         """

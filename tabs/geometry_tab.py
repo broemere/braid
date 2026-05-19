@@ -1,9 +1,10 @@
+import os
 import numpy as np
-from PySide6.QtCore import Slot, Qt
+from PySide6.QtCore import Slot, Qt, QUrl
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QSizePolicy
 )
-from PySide6.QtGui import QPainter, QPen, QColor, QPixmap, QFont
+from PySide6.QtGui import QPainter, QPen, QColor, QPixmap, QFont, QDesktopServices
 import pyqtgraph as pg
 from data_pipeline import DataPipeline
 from processing.data_transform import numpy_to_qpixmap
@@ -65,9 +66,22 @@ class GeometryTab(QWidget):
         self.btn_get_geometry = QPushButton("Get Geometry")
         self.btn_get_geometry.setMinimumHeight(40)
 
-        control_layout.addStretch()
+        # NEW: Checkbox for toggling smoothing
+        from PySide6.QtWidgets import QCheckBox  # Added locally if not in global import
+        self.chk_smoothing = QCheckBox("Apply Data Smoothing")
+        self.chk_smoothing.setChecked(getattr(self.pipeline, 'use_smoothing', True))
+
+        self.btn_open_folder = QPushButton("📁 Open Output Folder")
+        self.btn_open_folder.setMinimumHeight(40)
+        self.btn_open_folder.setEnabled(False)  # Disabled until video is ready
+
+
         control_layout.addWidget(self.btn_get_geometry)
         control_layout.addStretch()
+        control_layout.addWidget(self.chk_smoothing)  # Inserted in the middle
+        control_layout.addStretch()
+        control_layout.addWidget(self.btn_open_folder)
+
 
         layout.addLayout(control_layout)
 
@@ -78,7 +92,7 @@ class GeometryTab(QWidget):
         left_column = QVBoxLayout()
 
         # 1. X-Y Plane Title & Image
-        lbl_xy_title = QLabel("X-Y Orientation")
+        lbl_xy_title = QLabel("X-Y Orientation (Top)")
         lbl_xy_title.setAlignment(Qt.AlignCenter)
         lbl_xy_title.setStyleSheet("font-weight: bold; font-size: 14px;")
 
@@ -89,7 +103,7 @@ class GeometryTab(QWidget):
         self.btn_swap.setMinimumHeight(30)
 
         # 3. Z Plane Title & Image
-        lbl_z_title = QLabel("Z Orientation")
+        lbl_z_title = QLabel("Z Orientation (Mirror)")
         lbl_z_title.setAlignment(Qt.AlignCenter)
         lbl_z_title.setStyleSheet("font-weight: bold; font-size: 14px;")
 
@@ -113,24 +127,24 @@ class GeometryTab(QWidget):
         # --- Setup Plots (2x2 Grid) ---
 
         # ROW 1: Y Length & Z Length
-        self.plot_y = self.plot_widget.addPlot(title="Object Y Length (Longitudinal)")
-        self.plot_y.setLabel('left', 'Y Length', units='m')
+        self.plot_y = self.plot_widget.addPlot(title="Avg. Object Width (Y-Axis / 2D Projection)")
+        self.plot_y.setLabel('left', 'Width (Y)', units='m')
         self.curve_y = self.plot_y.plot(pen=pg.mkPen(color='#00d2ff', width=2))
 
-        self.plot_z = self.plot_widget.addPlot(title="Object Z Length (Transverse)")
-        self.plot_z.setLabel('left', 'Z Length', units='m')
+        self.plot_z = self.plot_widget.addPlot(title="Avg. Object Thickness (Z-Axis / 2D Projection)")
+        self.plot_z.setLabel('left', 'Thickness (Z)', units='m')
         self.curve_z = self.plot_z.plot(pen=pg.mkPen(color='#ff007f', width=2))
 
         self.plot_widget.nextRow()
 
         # ROW 2: Y-Z Area & X Length
-        self.plot_area = self.plot_widget.addPlot(title="Cross Sectional Area (Y-Z Plane)")
-        self.plot_area.setLabel('left', 'Area', units='m²')
+        self.plot_area = self.plot_widget.addPlot(title="Avg. YZ Cross-Sectional Area (3D Voxel Reconstruction)")
+        self.plot_area.setLabel('left', 'Area (Y-Z Plane)', units='m²')
         self.plot_area.setLabel('bottom', 'Frame Index')
         self.curve_area = self.plot_area.plot(pen=pg.mkPen(color='#00ff00', width=2))
 
-        self.plot_x = self.plot_widget.addPlot(title="Object X Length (Stretch Direction)")
-        self.plot_x.setLabel('left', 'X Length', units='m')
+        self.plot_x = self.plot_widget.addPlot(title="Max. Object Length (X-Axis / Stretch Direction)")
+        self.plot_x.setLabel('left', 'Length (X)', units='m')
         self.plot_x.setLabel('bottom', 'Frame Index')
         self.curve_x = self.plot_x.plot(pen=pg.mkPen(color='#ffaa00', width=2))
 
@@ -144,9 +158,14 @@ class GeometryTab(QWidget):
         self.btn_get_geometry.clicked.connect(self.pipeline.get_geometry)
         self.btn_swap.clicked.connect(self.pipeline.swap_dimensions)
 
+        # Connect the checkbox to instantly toggle data output
+        self.chk_smoothing.toggled.connect(self.pipeline.set_smoothing_enabled)
+
         # Pipeline -> UI
         self.pipeline.geometry_available.connect(self.on_new_data_received)
         self.pipeline.dimension_images_ready.connect(self.on_dimension_images_ready)
+        self.pipeline.video_compiled_ready.connect(self.on_video_compiled)
+        self.btn_open_folder.clicked.connect(self.on_open_folder_clicked)
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -236,3 +255,15 @@ class GeometryTab(QWidget):
             if len(area_data_mm2) == len(frames):
                 # Convert mm² to m² (1e-6)
                 self.curve_area.setData(frames, area_data_mm2 * 1e-6)
+
+    @Slot()
+    def on_open_folder_clicked(self):
+        """Cross-platform method to open the output folder."""
+        if self.output_dir and os.path.exists(self.output_dir):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.output_dir)))
+
+    @Slot(str)
+    def on_video_compiled(self, directory_path: str):
+        """Enables the 'Open Folder' button and stores the path once background task finishes."""
+        self.output_dir = directory_path
+        self.btn_open_folder.setEnabled(True)
