@@ -1,5 +1,5 @@
 APP_NAME = "BRAID"
-APP_VERSION = "0.1"
+APP_VERSION = "0.9"
 ORG = "TykockiLab"
 REPO_URL = "https://github.com/broemere/braid/releases/latest"
 SAVE_FILETYPE = ".braid"
