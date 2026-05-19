@@ -2,12 +2,14 @@ import os
 import sys
 import json
 import logging
+from inspect import trace
+
 import numpy as np
 from pathlib import Path
-from PySide6.QtCore import QObject, Signal, Slot, QTimer
+from PySide6.QtCore import QObject, Signal, Slot, QTimer, SignalInstance
 #from processing.data_transform import zero_data, smooth_data, label_image, create_visual_from_labels, convert_numpy, restore_numpy, n_closest_numbers
 from processing.data_loader import frame_loader, geometry_worker, keep_largest_component, video_compiler_worker
-from processing.data_transform import auto_thresh
+from processing.data_transform import serialize_objects, deserialize_objects
 from config import APP_VERSION
 from widgets.error_bus import user_error
 import cv2
@@ -19,6 +21,7 @@ from skimage.segmentation import chan_vese
 from skimage.draw import disk, ellipse, rectangle
 from scipy.signal import savgol_filter
 from scipy.optimize import curve_fit
+from scipy.interpolate import UnivariateSpline
 from scipy.stats import linregress
 
 
@@ -71,7 +74,10 @@ class DataPipeline(QObject):
 
     relaxation_available = Signal(dict)
 
-    exported_file = None
+    # Smoothing
+    s_value_changed = Signal(int)
+
+
 
 
     def __init__(self, parent=None):
@@ -123,6 +129,8 @@ class DataPipeline(QObject):
 
         self.layout = "vertical"
         self.voxel_arrays = []
+
+        exported_file = None
 
     @Slot(float, object)
     def set_trimmed_data(self, trim_time: float, trimmed_data: np.ndarray):
@@ -191,8 +199,8 @@ class DataPipeline(QObject):
 
         # From here down, self.data is guaranteed to exist and have the right columns
         log.info(f"Data keys available: {self.data.keys()}")
-        self.max_distance_index = np.argmax(self.data["distance"])
-        self.min_distance_index = np.argmin(self.data["distance"])
+        self.max_distance_index = int(np.argmax(self.data["distance"]))
+        self.min_distance_index = int(np.argmin(self.data["distance"]))
         self.data_available.emit(self.data)
         if len([i for i, x in enumerate(self.data["cycle"]) if x == np.max(self.data['cycle'])]) < 5:
             self.last_cycle = np.max(self.data["cycle"]) - 1
@@ -366,7 +374,7 @@ class DataPipeline(QObject):
         # Apply crops
         for roi_dict in self.roi_data[target]:
             rect = roi_dict["roi_rect"]
-            x, y, w, h = rect.x(), rect.y(), rect.width(), rect.height()
+            x, y, w, h = roi_dict["roi_rect"]
 
             if w > 0 and h > 0:
                 crop = gray[y:y + h, x:x + w]
@@ -383,8 +391,9 @@ class DataPipeline(QObject):
         # 1. Reset and populate the list of dictionaries for this target
         self.roi_data[target] = []
         for rect in roi_data:
+            rect_tuple = (rect.x(), rect.y(), rect.width(), rect.height())
             self.roi_data[target].append({
-                "roi_rect": rect,
+                "roi_rect": rect_tuple,
                 "crop_img": None,
                 "seed_shape_type": None,
                 "seed_coords": None,
@@ -641,10 +650,24 @@ class DataPipeline(QObject):
         x1_rect = max_data[1]["roi_rect"]
 
         def get_overlap_area(rect1, rect2):
-            """Helper to calculate the overlapping area of two QRects."""
-            intersection = rect1.intersected(rect2)
-            if intersection.isValid():
-                return intersection.width() * intersection.height()
+            """Helper to calculate the overlapping area of two (x, y, w, h) tuples."""
+            x1, y1, w1, h1 = rect1
+            x2, y2, w2, h2 = rect2
+
+            # Find the coordinates of the intersection rectangle
+            left = max(x1, x2)
+            right = min(x1 + w1, x2 + w2)
+            top = max(y1, y2)
+            bottom = min(y1 + h1, y2 + h2)
+
+            # Calculate width and height of intersection
+            inter_width = right - left
+            inter_height = bottom - top
+
+            # If both width and height are positive, they overlap
+            if inter_width > 0 and inter_height > 0:
+                return inter_width * inter_height
+
             return 0
 
         # --- Test Configuration A ---
@@ -1330,6 +1353,9 @@ class DataPipeline(QObject):
             if points_removed > 0:
                 log.info(f"Pipeline: Monotonicity filter removed {points_removed} noisy optical points.")
 
+        self.last_pull_stress = stress
+        self.last_pull_stretch = stretch
+
         # --- NEW: Determine the Split Index (Cutoff) ---
         max_points = len(stretch)
 
@@ -1539,6 +1565,34 @@ class DataPipeline(QObject):
         self.relaxation_payload = relax_payload
         print("Relaxation calculated and emitted!")
 
+    def calculate_spline(self, s_value: int) -> np.ndarray | None:
+        """
+        Calculates a smoothed spline for the stress-stretch data.
+
+        Args:
+            s_value: The smoothing factor 's' for the UnivariateSpline.
+
+        Returns:
+            A NumPy array of the smoothed y-values (stress) on success,
+            or None if the calculation fails (e.g., insufficient data).
+        """
+        if getattr(self, "last_pull_stretch", None) is None or self.last_pull_stretch.size < 4:
+            log.warning("Spline calculation skipped: not enough data points.")
+            self.p_spline = None # Ensure old spline is cleared
+            return None
+
+        try:
+            self.s_value = s_value
+            spline = UnivariateSpline(self.last_pull_stretch, self.last_pull_stress, s=s_value)
+            self.p_spline = spline  # Store the spline object
+            return spline(self.last_pull_stretch) # Return the calculated Y-values
+
+        except Exception as e:
+            log.error(f"Error during spline calculation: {e}")
+            self.p_spline = None # Ensure old spline is cleared
+            return None
+
+
     ### region EXPORT TAB
 
     def generate_report(self):
@@ -1573,9 +1627,101 @@ class DataPipeline(QObject):
         report_data["Y Dimension (mm)"] = self.geometry_data["dim_y"][:num_rows]
         report_data["Z Dimension (mm)"] = self.geometry_data["dim_z"][:num_rows]
         report_data["YZ Area (mm^2)"] = self.geometry_data["area"][:num_rows]
+        report_data["Min YZ Area (mm^2)"] = self.geometry_data["min_area"][:num_rows]
+        report_data["Volume (mm^3)"] = self.geometry_data["volume"][:num_rows]
         report_data["True Stress (kPa)"] = self.mechanics_payload["true_stress_kpa"][:num_rows]
+        report_data["True Stress Max (kPa)"] = self.mechanics_payload["true_stress_max_kpa"][:num_rows]
         report_data["Stretch X Tissue"] = self.mechanics_payload["stretch_x_opt"][:num_rows]
         report_data["Stretch X Jaws"] = self.mechanics_payload["stretch_x_mech"][:num_rows]
+
+        # --- NEW: Pad and Append Last Pull Data ---
+        # Retrieve attributes safely in case calculate_last_pull hasn't been executed
+        lp_stress = getattr(self, 'last_pull_stress', None)
+        lp_stretch = getattr(self, 'last_pull_stretch', None)
+
+        # Initialize columns with NaNs
+        padded_lp_stress = np.full(num_rows, np.nan)
+        padded_lp_stretch = np.full(num_rows, np.nan)
+
+        if lp_stress is not None and len(lp_stress) > 0:
+            fit_len = min(len(lp_stress), num_rows)
+            padded_lp_stress[:fit_len] = lp_stress[:fit_len]
+
+        if lp_stretch is not None and len(lp_stretch) > 0:
+            fit_len = min(len(lp_stretch), num_rows)
+            padded_lp_stretch[:fit_len] = lp_stretch[:fit_len]
+
+        report_data["Last Pull Stress (kPa)"] = padded_lp_stress.tolist()
+        report_data["Last Pull Stretch"] = padded_lp_stretch.tolist()
+
+        # --- NEW & SAFE: Spline Tangent Modulus (Derivative) Evaluation ---
+        spline_stress_targets = []
+        spline_slopes = []
+
+        p_spline = getattr(self, 'p_spline', None)
+
+        if p_spline is not None and lp_stress is not None and lp_stretch is not None and len(lp_stress) > 0:
+            max_stress = np.max(lp_stress)
+            min_stress = np.min(lp_stress)
+
+            target_val = 5.0
+
+            if max_stress >= target_val:
+                try:
+                    spline_deriv = p_spline.derivative()
+                except Exception as e:
+                    print(f"Warning: Failed to create spline derivative: {e}")
+                    spline_deriv = None
+
+                if spline_deriv is not None:
+                    while target_val <= max_stress:
+                        spline_stress_targets.append(target_val)
+                        slope_val = np.nan  # Default to nan for safety
+
+                        try:
+                            # Only calculate if the target stress is actually within the data bounds
+                            if target_val >= min_stress:
+                                idx = np.argmax(lp_stress >= target_val)
+
+                                if idx > 0:
+                                    stress_diff = lp_stress[idx] - lp_stress[idx - 1]
+                                    # Prevent division by zero if consecutive stress values are identical
+                                    if stress_diff > 1e-6:
+                                        fraction = (target_val - lp_stress[idx - 1]) / stress_diff
+                                        exact_stretch = lp_stretch[idx - 1] + fraction * (
+                                                    lp_stretch[idx] - lp_stretch[idx - 1])
+                                    else:
+                                        exact_stretch = lp_stretch[idx]
+                                else:
+                                    exact_stretch = lp_stretch[0]
+
+                                # Evaluate the derivative
+                                raw_slope = float(spline_deriv(exact_stretch))
+
+                                # Ensure it didn't return infinity or NaN
+                                if np.isfinite(raw_slope):
+                                    slope_val = raw_slope
+
+                        except Exception as e:
+                            # If a specific point fails, it logs silently and slope_val stays NaN
+                            print(f"Warning: Derivative failed at {target_val} kPa: {e}")
+                            pass
+
+                        spline_slopes.append(slope_val)
+                        target_val += 5.0
+
+        # Pad the spline arrays to match num_rows
+        padded_spline_stress = np.full(num_rows, np.nan)
+        padded_spline_slopes = np.full(num_rows, np.nan)
+
+        if len(spline_stress_targets) > 0:
+            fit_len = min(len(spline_stress_targets), num_rows)
+            padded_spline_stress[:fit_len] = spline_stress_targets[:fit_len]
+            padded_spline_slopes[:fit_len] = spline_slopes[:fit_len]
+
+        report_data["Tangent Modulus Eval Stress (kPa)"] = padded_spline_stress.tolist()
+        report_data["Tangent Modulus (kPa)"] = padded_spline_slopes.tolist()
+
 
         if getattr(self, 'relaxation_payload', None) is not None:
             rel_data = self.relaxation_payload
@@ -1683,10 +1829,11 @@ class DataPipeline(QObject):
         # Explicitly remove large or runtime-only objects
         keys_to_exclude = [
             'task_manager', 'loaded_state', 'backup_state',
+            'voxel_arrays',
             # 'left_leveled', 'right_leveled',
             # 'left_threshed', 'right_threshed',
             # 'left_threshed_old', 'right_threshed_old',
-            # 'objectNameChanged'  # Sometimes appears as a string/internal in Qt
+            'objectNameChanged'  # Sometimes appears as a string/internal in Qt
         ]
 
         for k in keys_to_exclude:
@@ -1701,6 +1848,8 @@ class DataPipeline(QObject):
             # This list comprehension creates a new list of simple (x, y) tuples
         #    state['key_locations'] = [(p.x, p.y) for p in state['key_locations']]
 
+        trace_bad_types(state)
+
         state = serialize_objects(state)
 
         if not debug_json:
@@ -1712,7 +1861,7 @@ class DataPipeline(QObject):
                 except (TypeError, OverflowError) as e:
                     print(f"[JSON SERIALIZATION FAILED] key='{key}':")
                     print(f"  • Type : {type(value).__name__}")
-                    print(f"  • Value: {value!r}")
+                    #print(f"  • Value: {value!r}")
                     print(f"  • Error: {e}")
             print("--- Debug Check Complete ---\n")
 
@@ -1738,6 +1887,8 @@ class DataPipeline(QObject):
         print("--- Size Analysis Complete ---\n")
 
         return state
+
+
 
     def load_session(self, state_dict):
 
@@ -1803,3 +1954,21 @@ class DataPipeline(QObject):
 
 
     # endregion
+
+def trace_bad_types(obj, path="state"):
+    """Recursively hunts for numpy dictionary keys and QRects, printing their exact path."""
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            # Check for numpy keys (which crash json.dump)
+            if hasattr(k, 'item') and type(k).__module__ == 'numpy':
+                log.warning(f"Found numpy key ({type(k).__name__}) at: {path} -> {k}")
+
+            # Recurse deeper
+            trace_bad_types(v, f"{path}['{k}']")
+
+    elif isinstance(obj, list):
+        for i, v in enumerate(obj):
+            trace_bad_types(v, f"{path}[{i}]")
+
+    elif "QRect" in str(type(obj)):
+        log.warning(f"Found QRect at: {path}")

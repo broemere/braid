@@ -2,6 +2,8 @@ import numpy as np
 import cv2
 from PySide6.QtGui import QImage, QPixmap
 import logging
+from pathlib import Path
+from collections import OrderedDict
 log = logging.getLogger(__name__)
 
 def numpy_to_qpixmap(numpy_array: np.ndarray) -> QPixmap:
@@ -46,24 +48,89 @@ def numpy_to_qpixmap(numpy_array: np.ndarray) -> QPixmap:
     # copy it before returning, so the array can be garbage collected.
     return QPixmap.fromImage(q_image.copy())
 
+def serialize_objects(obj):
+    """
+    Recursively convert numpy arrays and scalars into JSON-serializable forms:
+      - ndarray → dict with keys __ndarray__, dtype, shape, data (as nested lists)
+      - numpy scalar → native Python type via .item()
+    """
+    if isinstance(obj, np.ndarray):
+        return {
+            "__ndarray__": obj.tolist(),
+            "dtype": str(obj.dtype),
+            "shape": obj.shape
+        }
+    elif isinstance(obj, np.generic):
+        # covers np.int32, np.float64, etc.
+        return obj.item()
+    elif isinstance(obj, Path):
+        # Convert Path objects to a special dictionary format
+        return {
+            "__path__": str(obj)
+        }
+    elif isinstance(obj, OrderedDict):
+        # CRITICAL: This must come before the standard dict check!
+        # We save it as a list of pairs to guarantee order preservation in JSON
+        return {
+            "__OrderedDict__": [[k, serialize_objects(v)] for k, v in obj.items()]
+        }
+    elif isinstance(obj, set):
+        return {
+            "__set__": [serialize_objects(v) for v in obj]
+        }
+    elif isinstance(obj, dict):
+        return {k: serialize_objects(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [serialize_objects(v) for v in obj]
+    elif isinstance(obj, tuple):
+        return tuple(serialize_objects(v) for v in obj)
+    else:
+        return obj
 
-def auto_thresh(signals, images):
 
-    threshed_images = []
+def deserialize_objects(obj):
+    """
+    Recursively walk obj and convert back to numpy arrays when possible:
+      - If obj is a dict with "__ndarray__", build an array with the right dtype & shape.
+      - If obj is a nested list of numbers (1D/2D/3D), cast it to an ndarray.
+      - Otherwise, recurse into dicts & lists; leave other types untouched.
+    """
+    # 1) Reverse of our special-encoded ndarray
+    if isinstance(obj, dict) and "__ndarray__" in obj:
+        arr = np.array(obj["__ndarray__"], dtype=np.dtype(obj.get("dtype", None)))
+        if "shape" in obj:
+            arr = arr.reshape(obj["shape"])
+        return arr
 
-    signals.message.emit("Thresholding image...")
+    # 2) Reverse of encoded Path
+    if isinstance(obj, dict) and "__path__" in obj:
+        return Path(obj["__path__"])
 
-    total = len(images)*255
-    count = 0
+    # 3) Reverse of encoded OrderedDict
+    if isinstance(obj, dict) and "__OrderedDict__" in obj:
+        # Rebuild the OrderedDict from the list of [key, value] pairs
+        return OrderedDict([(k, deserialize_objects(v)) for k, v in obj["__OrderedDict__"]])
 
-    for i, img in enumerate(images):
-        threshed_images.append([])
-        for th in range(255):
-            _, thresh1 = cv2.threshold(img, th, 255, cv2.THRESH_BINARY)
-            threshed_images[i].append(thresh1)
+    # 4) Reverse of encoded set
+    if isinstance(obj, dict) and "__set__" in obj:
+        # Rebuild the set from the list
+        return set(deserialize_objects(v) for v in obj["__set__"])
 
-            count += 1
-            pct = int((count / total) * 100)
-            signals.progress.emit(pct)
+    # 5) Try to turn pure numeric lists into arrays
+    if isinstance(obj, list):
+        try:
+            arr = np.array(obj)
+            # only accept if it really is numeric and 1–3 dimensional
+            if arr.dtype.kind in ("i","u","f") and 1 <= arr.ndim <= 3:
+                return arr
+        except Exception:
+            pass
+        # otherwise, recurse into each element
+        return [deserialize_objects(v) for v in obj]
 
-    return threshed_images
+    # 6) Recurse into plain dicts
+    if isinstance(obj, dict):
+        return {k: deserialize_objects(v) for k, v in obj.items()}
+
+    # 7) Leave everything else alone
+    return obj

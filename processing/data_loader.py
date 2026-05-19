@@ -230,11 +230,16 @@ def _interpolate_rois_worker(roi_data: dict, pct: float) -> list[dict]:
         return int(round(start + (end - start) * pct))
 
     def lerp_rect(r_min, r_max, pct):
-        return QRect(
-            lerp_int(r_min.x(), r_max.x(), pct),
-            lerp_int(r_min.y(), r_max.y(), pct),
-            lerp_int(r_min.width(), r_max.width(), pct),
-            lerp_int(r_min.height(), r_max.height(), pct)
+        # Unpack the standard tuples
+        x1, y1, w1, h1 = r_min
+        x2, y2, w2, h2 = r_max
+
+        # Return a new interpolated tuple instead of a QRect
+        return (
+            lerp_int(x1, x2, pct),
+            lerp_int(y1, y2, pct),
+            lerp_int(w1, w2, pct),
+            lerp_int(h1, h2, pct)
         )
 
     interpolated_rois = []
@@ -636,8 +641,8 @@ def geometry_worker(signals, config: dict):
 
             for roi_idx, roi in enumerate(interp_rois):
                 # 1. CROP THE IMAGE HERE (In the Manager)
-                r = roi['roi_rect']
-                crop = gray[r.y(): r.y() + r.height(), r.x(): r.x() + r.width()]
+                x, y, w, h = roi['roi_rect']
+                crop = gray[y: y + h, x: x + w]
 
                 # 2. GENERATE SEED MASK HERE
                 if crop.size == 0:

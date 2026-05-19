@@ -44,6 +44,8 @@ class ROICanvas(QGraphicsView):
         self.completed_pen = QPen(QColor(Qt.green), 2)
         self.completed_pen.setCosmetic(True)
 
+        self._needs_fit = False
+
     # ——————————————
     # Public API
 
@@ -55,13 +57,21 @@ class ROICanvas(QGraphicsView):
         self._preview_rect_item = None
 
         self._image_item = self._scene.addPixmap(pixmap)
+        self.setSceneRect(QRectF(pixmap.rect()))
+        self._needs_fit = True
         self.reset_view()
         self.roi_updated.emit([])
 
     def reset_view(self):
         """Resets the view to fit the entire image within the viewport."""
         if self._image_item:
-            self.fitInView(self._image_item, Qt.KeepAspectRatio)
+            # NEW: Only execute the fit if the widget is visible and laid out.
+            # Otherwise, it defers until showEvent or resizeEvent.
+            if self.isVisible() and self.viewport().width() > 0:
+                self.fitInView(self._image_item, Qt.KeepAspectRatio)
+                self._needs_fit = False
+            else:
+                self._needs_fit = True
 
     def reset_rois(self):
         """Clear all drawn boxes."""
@@ -214,3 +224,19 @@ class ROICanvas(QGraphicsView):
 
         else:
             super().keyPressEvent(event)
+
+    def showEvent(self, event):
+        """Triggered when the widget actually appears on screen."""
+        super().showEvent(event)
+        if self._needs_fit:
+            self.reset_view()
+
+    def resizeEvent(self, event):
+        """Triggered when the layout size changes."""
+        super().resizeEvent(event)
+
+        # If this is the very first layout pass after loading an image, fit it.
+        # (Subsequent manual window resizes won't force a reset if the user
+        # has manually zoomed, because _needs_fit will be False).
+        if self._needs_fit:
+            self.reset_view()

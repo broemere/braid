@@ -3,8 +3,9 @@ import numpy as np
 from PySide6.QtCore import Qt, Slot
 from PySide6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QGroupBox, QFormLayout,
-    QComboBox, QDoubleSpinBox, QLabel, QTableWidget, QTableWidgetItem, QHeaderView
+    QComboBox, QDoubleSpinBox, QLabel, QTableWidget, QTableWidgetItem, QHeaderView, QLineEdit, QPushButton, QSlider, QSpinBox, QCheckBox
 )
+from PySide6.QtGui import QDoubleValidator, QColor
 import pyqtgraph as pg
 from data_pipeline import DataPipeline
 
@@ -15,6 +16,7 @@ class LastPullTab(QWidget):
     def __init__(self, pipeline: DataPipeline, parent=None):
         super().__init__(parent)
         self.pipeline = pipeline
+        self.current_stretch = np.array([])
         pg.setConfigOptions(antialias=True)
         self.init_ui()
         self.connect_signals()
@@ -23,7 +25,9 @@ class LastPullTab(QWidget):
         self.request_update()
 
     def init_ui(self):
-        layout = QHBoxLayout(self)
+        main_layout = QVBoxLayout(self)
+
+        top_split_layout = QHBoxLayout()
 
         # --- 1. Control Panel (Left) ---
         controls_layout = QVBoxLayout()
@@ -67,9 +71,9 @@ class LastPullTab(QWidget):
         stiff_layout = QVBoxLayout(self.stiffness_group)
 
         self.table_stiff = QTableWidget(5, 2)
-        self.table_stiff.setHorizontalHeaderLabels(["Initial (Low Stress)", "Final (High Stress)"])
+        self.table_stiff.setHorizontalHeaderLabels(["Low Stress", "High Stress"])
         self.table_stiff.setVerticalHeaderLabels(
-            ["Fitted Points (n)", "Slope (E) [kPa]", "Final λ", "Final σ [kPa]", "Intersection"])
+            ["Fitted Points (n)", "Slope (E) [kPa]", "Stop λ", "Stop σ [kPa]", "Intersection"])
 
         # Make the table cleanly fill the layout
         self.table_stiff.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
@@ -78,25 +82,72 @@ class LastPullTab(QWidget):
 
         stiff_layout.addWidget(self.table_stiff)
 
-        cutoff_layout = QFormLayout()
-        self.spin_cutoff = QDoubleSpinBox()
-        self.spin_cutoff.setRange(0.0, 100.0)
-        self.spin_cutoff.setDecimals(3)
-        self.spin_cutoff.setSingleStep(0.05)
-        self.spin_cutoff.setToolTip("Set to 0.0 to auto-calculate the middle index.")
+        cutoff_layout = QHBoxLayout()  # Changed to HBox to put the button next to the input
 
-        # Use Unicode λ for the label
-        cutoff_layout.addRow("Curve Bend Location (λ):", self.spin_cutoff)
+        lbl_cutoff = QLabel("Region Split Cutoff (λ):")
+
+        # Replace SpinBox with a LineEdit and a Validator
+        self.edit_cutoff = QLineEdit()
+        self.edit_cutoff.setValidator(QDoubleValidator(0.0, 100.0, 3))
+        self.edit_cutoff.setPlaceholderText("e.g. 1.050 (0 to auto-calculate)")
+        self.edit_cutoff.setToolTip("Set to 0 or leave blank to auto-calculate the middle index.")
+
+        self.btn_apply_cutoff = QPushButton("Apply")
+
+        self.show_linear_cb = QCheckBox("Show Fits")
+        self.show_linear_cb.setChecked(False)  # Disabled by default
+
+        stiff_layout.addWidget(lbl_cutoff)
+        cutoff_layout.addWidget(self.edit_cutoff)
+        cutoff_layout.addWidget(self.btn_apply_cutoff)
+        cutoff_layout.addWidget(self.show_linear_cb)
+
         stiff_layout.addLayout(cutoff_layout)
 
         controls_layout.addWidget(self.stiffness_group)
+
         controls_layout.addStretch()
 
-        layout.addLayout(controls_layout, stretch=1)
+        top_split_layout.addLayout(controls_layout, stretch=1)
+        self.plot_widget = pg.GraphicsLayoutWidget()
+        top_split_layout.addWidget(self.plot_widget, stretch=3)
+
+        # Add the completed split layout to the main root layout
+        main_layout.addLayout(top_split_layout, stretch=1)
+
+        #layout.addLayout(controls_layout, stretch=1)
+
+        # --- Bottom Section: Full-Width Spline Smoothing Tool ---
+        self.spline_group = QGroupBox("Spline Smoothing")
+        spline_layout = QHBoxLayout(self.spline_group)
+
+        spline_layout.addWidget(QLabel("Smoothing Factor (s):"))
+
+        self.s_slider = QSlider(Qt.Horizontal)
+        self.s_slider.setMinimum(0)
+        self.s_slider.setMaximum(100000)
+        self.s_slider.setValue(50)
+        self.s_slider.setTickPosition(QSlider.TicksBelow)
+        # Adding stretch=1 allows the slider to greedily consume all remaining horizontal space
+        spline_layout.addWidget(self.s_slider, stretch=1)
+
+        self.s_spinbox = QSpinBox()
+        self.s_spinbox.setMinimum(0)
+        self.s_spinbox.setMaximum(100000)
+        self.s_spinbox.setValue(50)
+        self.s_spinbox.setFixedWidth(80)
+        spline_layout.addWidget(self.s_spinbox)
+
+        self.show_spline_cb = QCheckBox("Show Smoothed Spline")
+        self.show_spline_cb.setChecked(True)
+        spline_layout.addWidget(self.show_spline_cb)
+
+        # Pin the spline group to the bottom of the main layout
+        main_layout.addWidget(self.spline_group)
 
         # --- 2. Plot Widget (Right) ---
-        self.plot_widget = pg.GraphicsLayoutWidget()
-        layout.addWidget(self.plot_widget, stretch=3)
+        #self.plot_widget = pg.GraphicsLayoutWidget()
+        #ayout.addWidget(self.plot_widget, stretch=3)
 
         self.plot_pull = self.plot_widget.addPlot(title="Last Pull: True Stress vs. Stretch")
         # Fixed: Using Unicode λ
@@ -105,17 +156,30 @@ class LastPullTab(QWidget):
         self.plot_pull.showGrid(x=True, y=True, alpha=0.3)
 
         self.curve_pull = self.plot_pull.plot(
-            name="Last Pull",
-            pen=pg.mkPen(color='#ffaa00', width=2.5)
+            name="Raw Data",
+            pen=pg.mkPen(color='#ffaa00', width=1.5)
         )
+        self.curve_pull.setZValue(1)
 
-        # --- NEW: Graph Elements for Linear Fits ---
+        # Spline Curve
+        self.curve_spline = self.plot_pull.plot(
+            name="B-Spline",
+            pen=pg.mkPen(color='#E74C3C', width=2.5)
+        )
+        self.curve_spline.setZValue(2)
+
+        # Linear Fit Curves
         self.curve_line0 = self.plot_pull.plot(pen=pg.mkPen(color='#00d2ff', width=2, style=Qt.DashLine))
         self.curve_line1 = self.plot_pull.plot(pen=pg.mkPen(color='#ff007f', width=2, style=Qt.DashLine))
-
-        # Large white dot for the intersection
         self.scatter_intersect = pg.ScatterPlotItem(size=12, pen=pg.mkPen(None), brush=pg.mkBrush(255, 255, 255, 255))
         self.plot_pull.addItem(self.scatter_intersect)
+        self.curve_line0.setZValue(3)
+        self.curve_line1.setZValue(3)
+        self.scatter_intersect.setZValue(4)
+
+        self.curve_line0.setVisible(False)
+        self.curve_line1.setVisible(False)
+        self.scatter_intersect.setVisible(False)
 
     def connect_signals(self):
         self.combo_mode.currentIndexChanged.connect(self.on_mode_changed)
@@ -123,7 +187,13 @@ class LastPullTab(QWidget):
         self.combo_mode.currentIndexChanged.connect(self.request_update)
         self.spin_manual_len.valueChanged.connect(self.request_update)
         self.spin_preload.valueChanged.connect(self.request_update)
-        self.spin_cutoff.valueChanged.connect(self.request_update)
+        self.btn_apply_cutoff.clicked.connect(self.request_update)
+        self.edit_cutoff.returnPressed.connect(self.request_update)
+        self.show_linear_cb.stateChanged.connect(self.toggle_linear_fits)
+
+        self.s_slider.valueChanged.connect(self._slider_value_changed)
+        self.s_spinbox.valueChanged.connect(self._spinbox_value_changed)
+        self.show_spline_cb.stateChanged.connect(self.run_spline_transform)
 
         self.pipeline.last_pull_available.connect(self.on_last_pull_received)
         self.pipeline.mechanics_available.connect(lambda _: self.request_update())
@@ -149,7 +219,11 @@ class LastPullTab(QWidget):
         mode_key = mode_map.get(mode_text, "cycle_start")
         manual_len = self.spin_manual_len.value()
         preload = self.spin_preload.value()
-        cutoff = self.spin_cutoff.value()
+        cutoff_text = self.edit_cutoff.text().strip()
+        try:
+            cutoff = float(cutoff_text) if cutoff_text else 0.0
+        except ValueError:
+            cutoff = 0.0
 
         self.pipeline.calculate_last_pull(
             ref_mode=mode_key,
@@ -157,6 +231,44 @@ class LastPullTab(QWidget):
             preload_force=preload,
             cutoff_stretch = cutoff
         )
+
+    @Slot()
+    def toggle_linear_fits(self):
+        """Toggles the visibility of the linearized stiffness fits and intersection point."""
+        is_visible = self.show_linear_cb.isChecked()
+        self.curve_line0.setVisible(is_visible)
+        self.curve_line1.setVisible(is_visible)
+        self.scatter_intersect.setVisible(is_visible)
+
+    def _slider_value_changed(self, value: int):
+        self.s_spinbox.blockSignals(True)
+        self.s_spinbox.setValue(value)
+        self.s_spinbox.blockSignals(False)
+        self.run_spline_transform()
+
+    def _spinbox_value_changed(self, value: int):
+        self.s_slider.blockSignals(True)
+        self.s_slider.setValue(value)
+        self.s_slider.blockSignals(False)
+        self.run_spline_transform()
+
+    def run_spline_transform(self):
+        """Fetches the smoothed Y values from the pipeline and plots them."""
+        show_spline = self.show_spline_cb.isChecked()
+        self.curve_spline.setVisible(show_spline)
+
+        if not show_spline or len(self.current_stretch) == 0:
+            return
+
+        s_value = self.s_slider.value()
+
+        # Ask pipeline for smoothed Y data
+        spline_y_values = self.pipeline.calculate_spline(s_value)
+
+        if spline_y_values is not None and len(spline_y_values) == len(self.current_stretch):
+            self.curve_spline.setData(self.current_stretch, spline_y_values)
+        else:
+            self.curve_spline.setData([], [])
 
     @Slot(dict)
     def on_last_pull_received(self, data: dict):
@@ -166,10 +278,16 @@ class LastPullTab(QWidget):
         stiff = data.get('stiffness')
         applied_cutoff = data.get('applied_cutoff', 0.0)
 
+        self.current_stretch = stretch
+
         # --- NEW: Safely update the spinbox without triggering a recalculation loop ---
-        self.spin_cutoff.blockSignals(True)
-        self.spin_cutoff.setValue(applied_cutoff)
-        self.spin_cutoff.blockSignals(False)
+        self.edit_cutoff.blockSignals(True)
+        # Only update the box with the pipeline's value if the user left it blank/0,
+        # otherwise leave their typed text alone so it doesn't jarringly reformat on them.
+        current_text = self.edit_cutoff.text().strip()
+        if not current_text or (current_text.replace('.', '', 1).isdigit() and float(current_text) == 0.0):
+            self.edit_cutoff.setText(f"{applied_cutoff:.3f}")
+        self.edit_cutoff.blockSignals(False)
 
         log.info(f"LastPullTab received data payload. Size: {len(stretch)} points. X0: {ref_length}")
 
@@ -194,6 +312,17 @@ class LastPullTab(QWidget):
 
             # Let pyqtgraph continue to auto-scale the Y-axis freely based on the new slice
             self.plot_pull.enableAutoRange(axis=pg.ViewBox.YAxis)
+
+            self.s_slider.blockSignals(True)
+            self.s_spinbox.blockSignals(True)
+
+            max_s = len(stretch) * 2  # Arbitrary scaling so the slider has good range
+            self.s_slider.setMaximum(max_s)
+            self.s_spinbox.setMaximum(max_s)
+            self.s_slider.setTickInterval(max_s // 10)
+
+            self.s_slider.blockSignals(False)
+            self.s_spinbox.blockSignals(False)
 
             # --- NEW: Populate Analysis Table and Fit Lines ---
             if stiff:
@@ -242,9 +371,12 @@ class LastPullTab(QWidget):
                 else:
                     self.scatter_intersect.setData([], [])
 
+            self.run_spline_transform()
+
         else:
             log.warning("LastPullTab received empty or mismatched data arrays. Clearing plot.")
             self.curve_pull.setData([], [])
+            self.curve_spline.setData([], [])
             self.curve_line0.setData([], [])
             self.curve_line1.setData([], [])
             self.scatter_intersect.setData([], [])
