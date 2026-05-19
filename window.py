@@ -1,6 +1,7 @@
 import logging
 from PySide6.QtCore import QSettings, Slot, Qt, QSize
-from PySide6.QtWidgets import QMainWindow, QWidget, QVBoxLayout, QTabWidget, QMessageBox, QPushButton
+from PySide6.QtGui import QAction
+from PySide6.QtWidgets import QMainWindow, QWidget, QVBoxLayout, QTabWidget, QMessageBox, QPushButton, QMenu
 from config import APP_NAME
 from processing.task_manager import TaskManager
 from widgets.status_bar import StatusBarWidget
@@ -52,6 +53,13 @@ class MainWindow(QMainWindow):
         self.super_tabs.setTabBarAutoHide(False)
         main_layout.addWidget(self.super_tabs)
 
+        # Menu button (left corner)
+        self.menu_button = QPushButton("☰ File")
+        self.menu_button.setToolTip("File Menu")
+        self.file_menu = QMenu(self)
+        self.menu_button.setMenu(self.file_menu)
+        self.super_tabs.setCornerWidget(self.menu_button, Qt.TopLeftCorner)
+
         # Add tab button (right corner)
         self.add_tab_button = QPushButton("+")
         self.add_tab_button.setToolTip("Open a new analysis session")
@@ -62,6 +70,20 @@ class MainWindow(QMainWindow):
 
     def connect_global_signals(self):
         """Connects signals for globally shared components."""
+
+        # Create menu actions
+        new_action = QAction("New Session", self)
+        save_action = QAction("Save Session", self)
+        load_action = QAction("Load Session", self)
+        self.file_menu.addAction(new_action)
+        self.file_menu.addSeparator()
+        self.file_menu.addAction(save_action)
+        self.file_menu.addAction(load_action)
+
+        # Connect actions to slots
+        new_action.triggered.connect(self.add_new_super_tab)
+        save_action.triggered.connect(self.on_save_session)
+        load_action.triggered.connect(self.on_load_session)
 
         # Connect the "add tab" button to its slot
         self.add_tab_button.clicked.connect(self.add_new_super_tab)
@@ -136,6 +158,24 @@ class MainWindow(QMainWindow):
         else:
             self.resize(1300, 750)  # Fallback to a default size
 
+    @Slot(str)
+    def on_update_available(self, new_version):
+        """
+        Slot called only if the UpdateChecker finds a newer version.
+        """
+        log.info(f"Update available: {new_version}")
+
+        # Construct a friendly message with a link
+        repo_url = "https://github.com/broemere/proper/releases/latest"
+        msg = (
+            f"A new version of {APP_NAME} is available!<br><br>"
+            f"Current version: <b>v{APP_VERSION}</b><br>"
+            f"New version: <b>{new_version}</b><br><br>"
+            f"Click <a href='{REPO_URL}'>here</a> to view the release page."
+        )
+
+        self.show_info_dialog("Update Available", msg)
+
     @Slot(tuple)
     def show_error_dialog(self, err_tb):
         """Displays a modal dialog for critical errors from background tasks."""
@@ -151,5 +191,18 @@ class MainWindow(QMainWindow):
         msg_box.setWindowTitle(title)
         msg_box.setText(str(exc))
         msg_box.setInformativeText(getattr(exc, "hint", f"Please check '{APP_NAME.lower()}.log' for details."))
+        msg_box.setStandardButtons(QMessageBox.Ok)
+        msg_box.exec()
+
+    def show_info_dialog(self, title: str, message: str):
+        """Displays a modal informational dialog with a standard icon and rich text."""
+        log.info(f"Displaying info dialog: {title}")
+        msg_box = QMessageBox(self)
+        msg_box.setIcon(QMessageBox.Information)
+        msg_box.setWindowTitle(title)
+        msg_box.setTextFormat(Qt.RichText)  # parse HTML
+        msg_box.setTextInteractionFlags(Qt.TextBrowserInteraction)
+        msg_box.setText(f"<b>{title}</b>")
+        msg_box.setInformativeText(message)
         msg_box.setStandardButtons(QMessageBox.Ok)
         msg_box.exec()

@@ -1,6 +1,7 @@
 APP_NAME = "BRAID"
 APP_VERSION = "0.1"
 ORG = "TykockiLab"
+REPO_URL = "https://github.com/broemere/braid/releases/latest"
 PLOT_COLORS = [
     '#1f77b4',  # Bright Blue
     '#ff7f0e',  # Bright Orange
