@@ -37,6 +37,11 @@ class MainWindow(QMainWindow):
 
         # Start with a single analysis session by default
         self.add_new_super_tab()
+
+        self.update_checker = UpdateChecker()
+        self.update_checker.update_available.connect(self.on_update_available)
+        self.update_checker.start()  # Runs in background, won't freeze app
+
         log.info("MainWindow initialized with one session.")
 
     def init_ui(self):
