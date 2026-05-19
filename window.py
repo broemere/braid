@@ -1,8 +1,8 @@
 import logging
 from PySide6.QtCore import QSettings, Slot, Qt, QSize
 from PySide6.QtGui import QAction
-from PySide6.QtWidgets import QMainWindow, QWidget, QVBoxLayout, QTabWidget, QMessageBox, QPushButton, QMenu
-from config import APP_NAME
+from PySide6.QtWidgets import QMainWindow, QWidget, QVBoxLayout, QTabWidget, QMessageBox, QPushButton, QMenu, QStyle, QFileDialog
+from config import APP_NAME, APP_VERSION, REPO_URL, SAVE_FILETYPE
 from processing.task_manager import TaskManager
 from widgets.status_bar import StatusBarWidget
 from widgets.analysis_widget import AnalysisWidget
@@ -144,6 +144,211 @@ class MainWindow(QMainWindow):
         if self.super_tabs.count() == 0:
             self.add_new_super_tab()
 
+    @Slot()
+    def on_save_session(self):
+        """
+        Initiates saving the state of the currently active analysis session.
+        Gets the state and file path from the user, then queues the file
+        writing and compression operation in the background TaskManager.
+        """
+        log.info("'Save Session' clicked")
+        current_index = self.super_tabs.currentIndex()
+
+        if current_index == -1:
+            QMessageBox.information(self, "No Session to Save", "There is no open analysis session to save.")
+            log.warning("Save action triggered, but no active tab was found.")
+            return
+
+        open_tab = self.super_tabs.widget(current_index)
+        tab_name = self.super_tabs.tabText(current_index)
+
+        try:
+            state = open_tab.pipeline.get_state()
+        except AttributeError:
+            log.error(f"The widget in the current tab '{tab_name}' does not have a 'pipeline.get_state()' method.")
+            QMessageBox.critical(self, "Error", f"Could not retrieve session state from '{tab_name}'.")
+            return
+
+        # Determine the initial directory for the file dialog
+        initial_dir = ""
+        if hasattr(open_tab, 'pipeline') and hasattr(open_tab.pipeline, 'csv_path') and open_tab.pipeline.csv_path:
+            csv_dir = os.path.dirname(open_tab.pipeline.csv_path)
+            if os.path.isdir(csv_dir):
+                initial_dir = csv_dir
+                log.info(f"Setting initial save directory based on CSV path: {initial_dir}")
+            else:
+                log.warning(f"Directory from CSV path does not exist: {csv_dir}")
+
+
+        options = QFileDialog.Options()
+        initial_filename = f"{tab_name}{SAVE_FILETYPE}"
+        full_initial_path = os.path.join(initial_dir, initial_filename)
+
+
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Compressed Session As...",
+            full_initial_path,
+            f"Compressed JSON (*{SAVE_FILETYPE});;All Files (*)",
+            options=options
+        )
+
+        if file_path:
+            # Ensure the file has the correct extension
+            if not file_path.endswith(SAVE_FILETYPE):
+                file_path += SAVE_FILETYPE
+
+            log.info(f"Queueing compressed save operation for: {file_path}")
+            self.task_manager.queue_task(
+                self._save_session_to_file_compressed,
+                state,
+                file_path,
+                on_result=self._on_save_completion
+            )
+        else:
+            log.info("Save operation was cancelled by the user.")
+
+    def _save_session_to_file_compressed(self, signals, state: dict, file_path: str):
+        """
+        Worker function that writes the session state to a gzipped JSON file.
+        Uses a compact JSON format for maximum compression.
+
+        Args:
+            signals: The signals object provided by the TaskManager.
+            state: The JSON-serializable dictionary representing the session state.
+            file_path: The full path to the file to be saved.
+
+        Returns:
+            The file_path if successful, otherwise None.
+        """
+        try:
+            log.debug(f"Background task started: writing compressed data to {file_path}")
+            signals.message.emit(f"Compressing and saving to {file_path}...")
+            signals.progress.emit(25)
+
+            # Use gzip.open with 'wt' for writing text compressed
+            # encoding is important for json.dump.
+            with gzip.open(file_path, 'wt', encoding='utf-8') as f:
+                # Dump the json in compact format (no indent) for better compression
+                json.dump(state, f)
+
+            signals.progress.emit(100)
+            signals.message.emit("Save complete.")
+            return file_path
+        except (IOError, TypeError, gzip.BadGzipFile) as e:
+            log.exception(f"Error in _save_session_to_file_compressed worker!")
+            signals.message.emit(f"Error saving compressed file: {e}")
+            return None
+
+    @Slot(object)
+    def _on_save_completion(self, result):
+        """
+        Callback function executed after the save task is completed.
+        Updates the status bar with a success message if the task was successful.
+
+        Args:
+            result: The return value from the worker function (file_path or None).
+        """
+        if result:
+            file_path = result
+            log.info(f"Session saved successfully to {file_path}")
+            #self.status_bar.update_status(f"Session saved to {file_path}", 5000)
+        else:
+            log.warning("Save task completed, but failed. See logs for details.")
+            #self.status_bar.update_status("Save failed.", 5000)
+
+    @Slot()
+    def on_load_session(self):
+        """
+        Initiates loading a compressed session state from a file.
+        Opens a file dialog, then queues a background task to read and
+        decompress the file.
+        """
+        log.info("'Load Session' clicked")
+        options = QFileDialog.Options()
+        last_dir = self.settings.value("last_dir", "") or str(Path.home())
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Load Compressed Session",
+            last_dir,
+            f"Compressed JSON (*{SAVE_FILETYPE});;All Files (*)",
+            options=options
+        )
+
+        if file_path:
+            log.info(f"Queueing load operation for: {file_path}")
+            self.task_manager.queue_task(
+                self._load_session_from_file_compressed,
+                file_path,
+                on_result=self._on_load_completion
+            )
+        else:
+            log.info("Load operation was cancelled by the user.")
+
+    def _load_session_from_file_compressed(self, signals, file_path: str):
+        """
+        Worker function that reads and decompresses a gzipped JSON file.
+        """
+        try:
+            log.debug(f"Background task started: reading compressed data from {file_path}")
+            signals.message.emit(f"Loading from {file_path}...")
+            signals.progress.emit(25)
+            with gzip.open(file_path, 'rt', encoding='utf-8') as f:
+                state = json.load(f)
+            signals.progress.emit(100)
+            signals.message.emit("Load complete.")
+            return {'state': state, 'file_path': file_path}
+        except (IOError, TypeError, gzip.BadGzipFile, json.JSONDecodeError) as e:
+            log.exception(f"Error in _load_session_from_file_compressed worker!")
+            signals.message.emit(f"Error loading file: {e}")
+            return None
+
+    @Slot(object)
+    def _on_load_completion(self, result):
+        """
+        Callback function executed after the load task is completed.
+        Creates a new tab and loads the session state into its pipeline.
+        """
+        if not (result and 'state' in result and 'file_path' in result):
+            log.warning("Load task completed, but failed. See logs for details.")
+            # self.status_bar.update_status("Load failed.", 5000)
+            return
+        state = result['state']
+        file_path = result['file_path']
+        log.info(f"Successfully loaded session from {file_path}. Creating new tab.")
+
+        # Create a new tab but don't give it focus immediately
+        new_tab_index = self.add_new_super_tab(unfocus=True)
+        new_tab_widget = self.super_tabs.widget(new_tab_index)
+
+        # Set the tab name
+        file_name = os.path.splitext(os.path.basename(file_path))[0]
+        self.super_tabs.setTabText(new_tab_index, file_name)
+        self.super_tabs.setTabIcon(new_tab_index, self.style().standardIcon(QStyle.SP_DriveNetIcon))
+
+        # Instead of loading the state immediately, schedule it to run
+        # after the event loop has had a chance to fully create the new tab.
+        QTimer.singleShot(0, lambda: self._finish_loading_state(new_tab_widget, state, file_name))
+
+    def _finish_loading_state(self, new_tab_widget, state, file_name):
+        """
+        This method runs on the next event loop cycle, ensuring all widgets
+        in the new_tab_widget are fully initialized before being accessed.
+        """
+        try:
+            new_tab_widget.pipeline.load_session(state)
+            new_tab_index = self.super_tabs.indexOf(new_tab_widget)
+            self.super_tabs.setCurrentIndex(new_tab_index)
+            # self.status_bar.update_status(f"Loaded session {file_name}", 5000)
+            log.info(f"State loaded into new tab: '{file_name}'")
+        except Exception as e:
+            log.exception("Failed to load state into the new session's pipeline.")
+            QMessageBox.critical(self, "Load Error", f"Could not apply the loaded session state:\n{e}")
+            # Clean up the failed tab
+            new_tab_index = self.super_tabs.indexOf(new_tab_widget)
+            if new_tab_index != -1:
+                self.super_tabs.removeTab(new_tab_index)
+
     def closeEvent(self, event):
         """Saves window geometry upon closing the application."""
         self.settings.setValue("windowGeometry", self.saveGeometry())
@@ -166,7 +371,7 @@ class MainWindow(QMainWindow):
         log.info(f"Update available: {new_version}")
 
         # Construct a friendly message with a link
-        repo_url = "https://github.com/broemere/proper/releases/latest"
+        repo_url = "https://github.com/broemere/braid/releases/latest"
         msg = (
             f"A new version of {APP_NAME} is available!<br><br>"
             f"Current version: <b>v{APP_VERSION}</b><br>"
