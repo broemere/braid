@@ -74,11 +74,12 @@ class AnalysisWidget(QWidget):
         author_layout.addWidget(author_label)
         self.tab_author = QLineEdit()
         self.tab_author.setPlaceholderText("Enter name...")
-        username = get_system_username()
-        self.pipeline.on_author_changed(username)
-        self.tab_author.setText(username)
+        self.username = get_system_username()
+        authorname = self.settings.value("author", defaultValue=self.username, type=str)
+        self.pipeline.on_author_changed(authorname)
+        self.tab_author.setText(authorname)
         self.tab_author.setClearButtonEnabled(True)
-        self.tab_author.textEdited.connect(self.pipeline.on_author_changed)
+        self.tab_author.textEdited.connect(self._save_author)
         author_layout.addWidget(self.tab_author)
 
         top_layout.addWidget(author_widget, 0)
@@ -169,14 +170,15 @@ class AnalysisWidget(QWidget):
         is_manual = self.settings.value("scale/is_manual", defaultValue=False, type=bool)
         self.pipeline.set_scale_is_manual(is_manual)
 
-
     @Slot(str)
     def on_file_selected(self, path: str):
         """Handles the selection of a video file for this session."""
         log.info(f"Session received video file path: {path}")
         file_name = os.path.basename(path)
         base_name, _ = os.path.splitext(file_name)
-        new_name = base_name.strip("recording_").replace("_video", "").replace("_c","")
+        new_name = base_name.removeprefix("recording_")
+        new_name = new_name.replace("_video", "")
+        new_name = new_name.replace("_c", "")
         self.tab_name_requested.emit(new_name)
         self.file_pickers.set_video_label(path)
 
@@ -286,3 +288,10 @@ class AnalysisWidget(QWidget):
         """Saves the manual conversion factor to settings."""
         self.settings.setValue("scale/manual_factor", factor)
 
+    @Slot(str)
+    def _save_author(self, author: str):
+        if author.strip() == "":
+            author = self.username
+        author = author.strip()
+        self.pipeline.on_author_changed(author)
+        self.settings.setValue("author", author)

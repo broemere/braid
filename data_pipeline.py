@@ -29,6 +29,8 @@ KERNEL = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (KERNEL_SIZE, KERNEL_SIZE)
 
 class DataPipeline(QObject):
     # --- SIGNALS ---
+    state_loaded = Signal()
+
     data_available = Signal(dict)
 
     # Plot inputs
@@ -1639,5 +1641,165 @@ class DataPipeline(QObject):
                 f.write(','.join(formatted_row) + '\n')
         print(f"Report successfully written to {filepath}")
         self.exported_file = filepath
+
+    # endregion
+
+
+    ### region SESSION handling
+
+    def get_state(self, debug_json=False):
+        """
+        Collects all serializable attributes into a dictionary for saving.
+
+        This method handles the conversion of non-serializable objects (like QPointF)
+        into a format that can be pickled.
+        """
+        # Start with a dictionary of all of the pipeline data
+        state = vars(self).copy()
+
+        # --- 1. Dynamic Filtering ---
+        keys_to_remove = []
+        for key, value in state.items():
+            # Filter out PySide Signals
+            if isinstance(value, SignalInstance):
+                keys_to_remove.append(key)
+                continue
+
+            # Filter out Qt Internals (like __METAOBJECT__)
+            if key.startswith('__') or "PyCapsule" in str(type(value)):
+                keys_to_remove.append(key)
+                continue
+
+            # Filter out Scipy Splines (checking type string avoids needing to import scipy here)
+            if "scipy" in str(type(value)) and "Spline" in str(type(value)):
+                keys_to_remove.append(key)
+                continue
+
+        # Remove the dynamically identified keys
+        for key in keys_to_remove:
+            state.pop(key, None)
+
+        # --- 2. Manual Exclusions ---
+        # Explicitly remove large or runtime-only objects
+        keys_to_exclude = [
+            'task_manager', 'loaded_state', 'backup_state',
+            # 'left_leveled', 'right_leveled',
+            # 'left_threshed', 'right_threshed',
+            # 'left_threshed_old', 'right_threshed_old',
+            # 'objectNameChanged'  # Sometimes appears as a string/internal in Qt
+        ]
+
+        for k in keys_to_exclude:
+            try:
+                state.pop(k, None)
+            except:
+                pass
+
+        # 3. Convert any non-serializable objects into a savable format.
+        # Here, we convert the list of QPointF objects into a list of tuples.
+        #if 'key_locations' in state and state['key_locations']:
+            # This list comprehension creates a new list of simple (x, y) tuples
+        #    state['key_locations'] = [(p.x, p.y) for p in state['key_locations']]
+
+        state = serialize_objects(state)
+
+        if not debug_json:
+            print("\n--- Running JSON Serialization Check ---")
+            for key, value in state.items():
+                try:
+                    # this will raise TypeError (or OverflowError) if not serializable
+                    json.dumps(value)
+                except (TypeError, OverflowError) as e:
+                    print(f"[JSON SERIALIZATION FAILED] key='{key}':")
+                    print(f"  • Type : {type(value).__name__}")
+                    print(f"  • Value: {value!r}")
+                    print(f"  • Error: {e}")
+            print("--- Debug Check Complete ---\n")
+
+        log.info(f"Analysis state compiled")
+
+        print("\n--- JSON Size Analysis (per key) ---")
+        sizes = {}
+        for key, value in state.items():
+            try:
+                j = json.dumps(value)
+                size_bytes = len(j.encode('utf-8'))
+                sizes[key] = size_bytes
+            except Exception:
+                sizes[key] = None
+        # Sort descending by size (None last)
+        for key, sz in sorted(sizes.items(),
+                              key=lambda kv: (kv[1] is None, kv[1]),
+                              reverse=True):
+            if sz is None:
+                print(f"{key:30s}: <failed to serialize>")
+            else:
+                print(f"{key:30s}: {sz/1e6:8.3f} MB")
+        print("--- Size Analysis Complete ---\n")
+
+        return state
+
+    def load_session(self, state_dict):
+
+        print("Loaded session!")
+        fixed_dict = deserialize_objects(state_dict)
+        print("Setting variables...")
+        for k, v in fixed_dict.items():
+            setattr(self, k, v)
+            print(k, v)
+        print("Refreshing...")
+        self.loaded_state = True
+        self.backup_state = fixed_dict
+        self.refresh_session()
+
+    def refresh_session(self):
+        self.update_pipeline()
+        self.author_recieved.emit(self.author)
+        if self.video:
+            if sys.platform != self.platform or (sys.platform == "mac" and ":" in self.video) or (sys.platform == "win" and ":" not in self.video):
+                resolved_path = resolve_cross_platform_path(self.video)
+                log.info("File resolved:", resolved_path)
+                if resolved_path:
+                    self.video = str(resolved_path / Path(self.video).name)
+                    log.info("Cross Platform Filepath resolved", self.video)
+                    if self.csv_path:
+                        self.csv_path = str(resolved_path / Path(self.csv_path).name)
+                        log.info("Cross Platform Filepath resolved", self.csv_path)
+                    if self.exported_file:
+                        self.exported_file = str(resolved_path / Path(self.exported_file).name)
+                        log.info("Cross Platform Filepath resolved", self.exported_file)
+            if not Path(self.video).exists():
+                mkv_path = Path(self.video).with_suffix(".mkv")
+                if mkv_path.exists():
+                    log.info("Found MKV in place of original video file.")
+                    self.video = str(mkv_path)
+        self.video_filename_updated.emit(self.video)
+        self.csv_filename_updated.emit(self.csv_path)
+        video_exists = Path(self.video).exists() if self.video else False
+        self.video_status_changed.emit(video_exists)
+        self.known_length_changed.emit(self.known_length)
+        self.pixel_length_changed.emit(self.pixel_length)
+        self.left_image_changed.emit(self.left_image)
+        self.right_image_changed.emit(self.right_image)
+        self.brightness_changed.emit(self.brightness)
+        self.contrast_changed.emit(self.contrast)
+        if self.left_image:
+            self.level_update()
+        self.threshold_changed.emit(self.threshold)
+        if self.left_threshed:
+            self.segment_image(self.left_threshed, "left")
+            self.left_threshed_old = self.left_threshed.copy()
+        if self.right_threshed:
+            self.segment_image(self.right_threshed, "right")
+
+            self.right_threshed_old = self.right_threshed.copy()
+        self._recalculate_conversion_factor()
+        print(self.scale_line_coords)
+        #self.scale_line_coords_changed.emit(self.scale_line_coords)
+        #self.thickness_changed.emit(self.thickness_data)
+        self.s_value_changed.emit(self.s_value)
+        self.n_ellipses_changed.emit(self.n_ellipses)
+        self.infusion_rate_changed.emit(self.infusion_rate)
+
 
     # endregion
