@@ -1,5 +1,5 @@
 import logging
-from PySide6.QtCore import QSettings, Slot, Qt, QSize
+from PySide6.QtCore import QSettings, Slot, Qt, QSize, QTimer
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import QMainWindow, QWidget, QVBoxLayout, QTabWidget, QMessageBox, QPushButton, QMenu, QStyle, QFileDialog
 from config import APP_NAME, APP_VERSION, REPO_URL, SAVE_FILETYPE
@@ -8,7 +8,10 @@ from widgets.status_bar import StatusBarWidget
 from widgets.analysis_widget import AnalysisWidget
 from widgets.circle_widget import make_circle_icon, get_color
 from widgets.error_bus import bus
-
+import os
+import json
+import gzip
+from pathlib import Path
 
 log = logging.getLogger(__name__)
 
@@ -171,13 +174,13 @@ class MainWindow(QMainWindow):
 
         # Determine the initial directory for the file dialog
         initial_dir = ""
-        if hasattr(open_tab, 'pipeline') and hasattr(open_tab.pipeline, 'csv_path') and open_tab.pipeline.csv_path:
-            csv_dir = os.path.dirname(open_tab.pipeline.csv_path)
-            if os.path.isdir(csv_dir):
-                initial_dir = csv_dir
-                log.info(f"Setting initial save directory based on CSV path: {initial_dir}")
+        if hasattr(open_tab, 'pipeline') and hasattr(open_tab.pipeline, 'video') and open_tab.pipeline.video:
+            video_dir = os.path.dirname(open_tab.pipeline.video)
+            if os.path.isdir(video_dir):
+                initial_dir = video_dir
+                log.info(f"Setting initial save directory based on video path: {initial_dir}")
             else:
-                log.warning(f"Directory from CSV path does not exist: {csv_dir}")
+                log.warning(f"Directory from video path does not exist: {video_dir}")
 
 
         options = QFileDialog.Options()
