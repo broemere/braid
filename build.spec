@@ -4,7 +4,7 @@ import os
 # --- Configuration ---
 app_version = os.environ.get('APP_VERSION', '0.9.5')
 target_arch = os.environ.get('PYINSTALLER_TARGET_ARCH')
-app_name = 'BRAID' if sys.platform == 'darwin' else f'braid_v{app_version}'
+app_name = 'BRAID' if sys.platform == 'darwin' else f'BRAID_v{app_version}'
 
 # --- Platform-specific icons ---
 if sys.platform == 'darwin':  # macOS
