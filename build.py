@@ -4,6 +4,7 @@ import re
 import shutil
 import subprocess
 import sys
+import platform
 
 # --- Configuration ---
 APP_SCRIPT = 'main.py'
@@ -43,27 +44,30 @@ def clean():
     print("Clean complete.\n")
 
 
-def build(version):
-    """Runs the PyInstaller command after setting the version environment variable."""
-    print("--- Running PyInstaller ---")
+def build(version, arch=None, label=None):
+    """Runs PyInstaller after setting version and optional macOS architecture."""
+    build_name = f"{label} ({arch})" if label and arch else "default"
+    print(f"--- Running PyInstaller for {build_name} ---")
 
-    # Set the version in an environment variable for the spec file to read (only for this process, not system)
     env = os.environ.copy()
     env['APP_VERSION'] = version
+    if arch:
+        env['PYINSTALLER_TARGET_ARCH'] = arch
+    if label:
+        env['APP_BUILD_LABEL'] = label
 
     command = ['pyinstaller', SPEC_FILE, '--clean']
 
     print(f"Executing: {' '.join(command)}")
-    # Pass the modified environment to the subprocess
     subprocess.run(command, check=True, env=env)
     print("PyInstaller build successful!\n")
 
 
-def archive(version):
-    """Creates a distributable ZIP archive of the build."""
+def archive(version, arch=None, label=None):
+    """Creates a distributable archive of the build."""
     print("--- Creating distributable archive ---")
     platform = 'mac' if sys.platform == 'darwin' else 'win'
-    app_versioned_name = f"{APP_BASE_NAME}_v{version}"
+    app_versioned_name = f"BRAID {label}" if label else f"{APP_BASE_NAME}_v{version}"
 
     # --- macOS DMG Creation ---
     if platform == 'mac':
@@ -76,7 +80,8 @@ def archive(version):
             print("Ensure your .spec file is set to create a windowed .app bundle.")
             return
 
-        final_dmg_path = os.path.join('dist', f"{app_versioned_name}_{platform}.dmg")
+        dmg_label = label or arch or platform
+        final_dmg_path = os.path.join('dist', f"BRAID_v{version}_{dmg_label}_{platform}.dmg")
         print(f"Creating {final_dmg_path}...")
 
         command = [
@@ -137,10 +142,22 @@ def archive(version):
 if __name__ == "__main__":
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
     try:
-        #clean()
+        # clean()
         app_version = get_version()
-        build(app_version)
-        archive(app_version)
+
+        if sys.platform == 'darwin':
+            arch = platform.machine()
+            labels = {"arm64": "Silicon", "x86_64": "Intel"}
+
+            if arch not in labels:
+                raise RuntimeError(f"Unsupported macOS architecture: {arch}")
+
+            build(app_version, arch, labels[arch])
+            archive(app_version, arch, labels[arch])
+        else:
+            build(app_version)
+            archive(app_version)
+
         print("✅ Build process complete!")
     except Exception as e:
         print(f"\n--- ❌ BUILD FAILED ---")

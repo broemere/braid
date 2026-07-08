@@ -6,6 +6,7 @@ from config import APP_NAME, APP_VERSION, REPO_URL, SAVE_FILETYPE
 from processing.task_manager import TaskManager
 from widgets.status_bar import StatusBarWidget
 from widgets.analysis_widget import AnalysisWidget
+from widgets.update_checker import UpdateChecker
 from widgets.circle_widget import make_circle_icon, get_color
 from widgets.error_bus import bus
 import os

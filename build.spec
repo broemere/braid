@@ -2,13 +2,14 @@ import sys
 import os
 
 # --- Configuration ---
-# Get the version from an environment variable set by a build script
-app_version = os.environ.get('APP_VERSION', '0.0.0')
-app_name = f'braid_v{app_version}'
+app_version = os.environ.get('APP_VERSION', '0.9.5')
+target_arch = os.environ.get('PYINSTALLER_TARGET_ARCH')
+app_label = os.environ.get('APP_BUILD_LABEL')
+app_name = f'BRAID {app_label}' if app_label else f'BRAID v{app_version}'
 
 # --- Platform-specific icons ---
 if sys.platform == 'darwin':  # macOS
-    icon_file = os.path.join('resources', 'app.icns')
+    icon_file = os.path.join('resources', 'braid.icns')
 else:  # Windows
     icon_file = os.path.join('resources', 'app.ico')
 
@@ -29,7 +30,7 @@ a = Analysis(
     collect_stubs=['skimage'],
     hookspath=[],
     runtime_hooks=[],
-    excludes=['pyqtgraph.opengl'], # Not required for 2D plotting only. Remove if 3D plots are used.
+    includes=['pyqtgraph.opengl'], # Not required for 2D plotting only. Remove if 3D plots are used.
     noarchive=False,
     optimize=0,
 )
@@ -50,6 +51,7 @@ if sys.platform == 'darwin':
         upx=True,
         console=False,
         icon=icon_file,
+        target_arch=target_arch,
     )
     coll = COLLECT(
         exe,
