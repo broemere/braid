@@ -10,7 +10,7 @@ import platform
 APP_SCRIPT = 'main.py'
 CONFIG_SCRIPT = 'config.py'
 SPEC_FILE = 'build.spec'
-APP_BASE_NAME = 'braid'
+APP_BASE_NAME = 'BRAID'
 
 
 def get_version():
