@@ -53,10 +53,8 @@ def build(version, arch=None, label=None):
     env['APP_VERSION'] = version
     if arch:
         env['PYINSTALLER_TARGET_ARCH'] = arch
-    if label:
-        env['APP_BUILD_LABEL'] = label
 
-    command = ['pyinstaller', SPEC_FILE, '--clean']
+    command = [sys.executable, '-m', 'PyInstaller', SPEC_FILE, '--clean', '--noconfirm']
 
     print(f"Executing: {' '.join(command)}")
     subprocess.run(command, check=True, env=env)
@@ -66,13 +64,13 @@ def build(version, arch=None, label=None):
 def archive(version, arch=None, label=None):
     """Creates a distributable archive of the build."""
     print("--- Creating distributable archive ---")
-    platform = 'mac' if sys.platform == 'darwin' else 'win'
-    app_versioned_name = f"BRAID {label}" if label else f"{APP_BASE_NAME}_v{version}"
+    platform_name = 'mac' if sys.platform == 'darwin' else 'win'
+    app_versioned_name = f"{APP_BASE_NAME}_v{version}"
 
     # --- macOS DMG Creation ---
-    if platform == 'mac':
+    if platform_name == 'mac':
         print("Platform is macOS. Creating .dmg...")
-        source_app_path = os.path.join('dist', f"{app_versioned_name}.app")
+        source_app_path = os.path.join('dist', 'BRAID.app')
         # Check that the .app bundle exists
         if not os.path.exists(source_app_path):
             print(f"Error: Cannot create DMG. Source app not found at:")
@@ -80,13 +78,13 @@ def archive(version, arch=None, label=None):
             print("Ensure your .spec file is set to create a windowed .app bundle.")
             return
 
-        dmg_label = label or arch or platform
-        final_dmg_path = os.path.join('dist', f"BRAID_v{version}_{dmg_label}_{platform}.dmg")
+        dmg_label = label or arch or platform_name
+        final_dmg_path = os.path.join('dist', f"BRAID_v{version}_{dmg_label}_{platform_name}.dmg")
         print(f"Creating {final_dmg_path}...")
 
         command = [
             'hdiutil', 'create',
-            '-volname', f"{APP_BASE_NAME} v{version}",  #Name of the volume when the user opens the .dmg
+            '-volname', f"BRAID {version} {dmg_label}",
             '-srcfolder', source_app_path,  # Path to the .app to include
             '-ov',
             '-format', 'UDZO',
@@ -96,7 +94,6 @@ def archive(version, arch=None, label=None):
         print(f"Executing: {' '.join(command)}")
         try:
             subprocess.run(command, check=True, capture_output=True, text=True)
-            print(f"Successfully created archive: {final_dmg_path}\n")
         except subprocess.CalledProcessError as e:
             print("--- HDIUTIL FAILED ---")
             print("STDERR:", e.stderr)
@@ -105,9 +102,10 @@ def archive(version, arch=None, label=None):
             print("--- HDIUTIL FAILED ---")
             print("Error: 'hdiutil' command not found.")
             return
+        print(f"Successfully created archive: {final_dmg_path}\n")
 
     # --- Windows ZIP Creation ---
-    elif platform == 'win':
+    elif platform_name == 'win':
         print("Platform is Windows. Creating .zip...")
 
         # Look for the versioned folder or .exe file
@@ -127,7 +125,7 @@ def archive(version, arch=None, label=None):
             print("PyInstaller build may have failed or produced unexpected output.")
             return
 
-        archive_path_without_ext = os.path.join('dist', f"{app_versioned_name}_{platform}")
+        archive_path_without_ext = os.path.join('dist', f"{app_versioned_name}_{platform_name}")
         print(f"Zipping '{base_dir_to_zip}' into '{archive_path_without_ext}.zip'...")
 
         shutil.make_archive(
