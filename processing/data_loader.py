@@ -10,6 +10,7 @@ from skimage.segmentation import chan_vese
 from skimage.draw import rectangle, ellipse
 from PySide6.QtCore import QRect
 from processing.resource_loader import resource_path
+from processing.trimming import iter_selected_frames
 import concurrent.futures
 import multiprocessing
 from pathlib import Path
@@ -566,6 +567,7 @@ def _interpolate_rois_worker(roi_data: dict, pct: float) -> list[dict]:
 def geometry_worker(signals, config: dict):
     file_path = config['file_path']
     distances = config['distances']
+    frame_indices = np.asarray(config.get('frame_indices', np.arange(len(distances))), dtype=np.int64)
     min_dist = config['min_dist']
     max_dist = config['max_dist']
     roi_data = config['roi_data']
@@ -577,40 +579,15 @@ def geometry_worker(signals, config: dict):
     frames_out = []
     width_masks_out, thickness_masks_out = [], []
 
-    # Determine the file type once
-    file_ext = os.path.splitext(file_path)[1].lower()
     total_frames = len(distances)
+    if len(frame_indices) != total_frames:
+        raise ValueError("Geometry distances and source-frame indices must have equal lengths.")
 
     # Get optimal core count (leave one or two for the OS/GUI)
     max_workers = max(1, multiprocessing.cpu_count() - 2)
 
     width_results = {}
     thickness_results = {}
-
-    # ---------------------------------------------------------
-    # Helper Generator: Abstracts the file reading logic
-    # ---------------------------------------------------------
-    def frame_generator():
-        if file_ext in ['.tif', '.tiff']:
-            with TiffFile(file_path) as tif:
-                for idx in range(total_frames):
-                    yield tif.pages[idx].asarray()
-
-        elif file_ext == '.mkv':
-            cap = cv2.VideoCapture(file_path)
-            if not cap.isOpened():
-                raise IOError(f"Worker failed to open video file: {file_path}")
-            try:
-                for _ in range(total_frames):
-                    ret, frame_data = cap.read()
-                    if not ret:
-                        raise RuntimeError("Video ended prematurely before processing all distances.")
-                    yield frame_data
-            finally:
-                cap.release()  # Ensures the video file is safely closed even on error
-
-        else:
-            raise ValueError(f"Unsupported geometry file format: {file_ext}")
 
     # Start the multiprocessing pool
     with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
@@ -620,7 +597,7 @@ def geometry_worker(signals, config: dict):
 
         # --- PRODUCER LOOP ---
         # Zip the distances array with our new unified frame generator
-        for i, (distance, frame) in enumerate(zip(distances, frame_generator())):
+        for i, (distance, frame) in enumerate(zip(distances, iter_selected_frames(file_path, frame_indices))):
 
             # 1. Calculate percentage and clamp it mathematically
             pct = (distance - min_dist) / (max_dist - min_dist)
@@ -716,7 +693,8 @@ def geometry_worker(signals, config: dict):
 
     return {
         'first_masks': width_masks_out,
-        'second_masks': thickness_masks_out
+        'second_masks': thickness_masks_out,
+        'trim_revision': config.get('trim_revision', 0),
     }
 
 def keep_largest_component(mask: np.ndarray, connectivity: int = 8) -> np.ndarray:

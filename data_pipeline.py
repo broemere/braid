@@ -10,6 +10,7 @@ from PySide6.QtCore import QObject, Signal, Slot, QTimer, SignalInstance
 #from processing.data_transform import zero_data, smooth_data, label_image, create_visual_from_labels, convert_numpy, restore_numpy, n_closest_numbers
 from processing.data_loader import frame_loader, geometry_worker, keep_largest_component, video_compiler_worker
 from processing.data_transform import serialize_objects, deserialize_objects
+from processing.trimming import map_distance_extrema_to_source
 from config import APP_VERSION
 from widgets.error_bus import user_error
 import cv2
@@ -42,6 +43,7 @@ class DataPipeline(QObject):
 
     trimmed_data_available = Signal(object)  # 'object' is safest for passing numpy arrays
     trim_time_changed = Signal(float)
+    trim_range_changed = Signal(float, float)
 
     # Scale inputs
     known_length_changed = Signal(float)
@@ -101,7 +103,13 @@ class DataPipeline(QObject):
         self.plot_selection: str = "Time vs. Force"
         self.cycle_selection: str = "All Cycles"
         self.trim_time: float = 0.0
+        self.trim_start_time: float = 0.0
+        self.trim_end_time: float = 0.0
         self.data_trimmed = None
+        self.active_frame_indices = np.array([], dtype=np.int64)
+        self.min_distance_data_index = 0
+        self.max_distance_data_index = 0
+        self.trim_revision = 0
 
         # SCALE TAB
         self.known_length = 0.0
@@ -132,19 +140,83 @@ class DataPipeline(QObject):
 
         exported_file = None
 
-    @Slot(float, object)
-    def set_trimmed_data(self, trim_time: float, trimmed_data: np.ndarray):
-        """Receives trimmed data from the PlotTab and broadcasts it to the rest of the app."""
-        self.trim_time = trim_time
-        self.data_trimmed = trimmed_data
+    @Slot(float, float, object, object)
+    def set_trimmed_data(
+            self,
+            start_time: float,
+            end_time: float,
+            trimmed_data: np.ndarray,
+            source_indices: np.ndarray,
+    ):
+        """Store and broadcast the active data range and its source-frame mapping."""
+        source_indices = np.asarray(source_indices, dtype=np.int64)
+        if len(trimmed_data) != len(source_indices):
+            raise ValueError("Trimmed data and source-frame indices must have equal lengths.")
 
-        log.info(f"Data trimmed at {self.trim_time}s. Broadcasting new data.")
+        had_active_data = self.data_trimmed is not None and self.data_trimmed.size > 0
+        range_changed = had_active_data and (
+            start_time != self.trim_start_time
+            or end_time != self.trim_end_time
+            or not np.array_equal(source_indices, self.active_frame_indices)
+            or not np.array_equal(trimmed_data, self.data_trimmed)
+        )
+
+        self.trim_start_time = start_time
+        self.trim_end_time = end_time
+        self.trim_time = end_time  # Legacy end-time alias retained for saved-state compatibility.
+        self.data_trimmed = trimmed_data
+        self.active_frame_indices = source_indices
+
+        if range_changed:
+            self.trim_revision += 1
+            self._invalidate_derived_analysis()
+
+        log.info(
+            "Data range set from %.6fs to %.6fs (%d samples).",
+            self.trim_start_time,
+            self.trim_end_time,
+            len(self.data_trimmed),
+        )
 
         self._recalculate_roi_indices()
 
         # Emit signals so other tabs can update
         self.trim_time_changed.emit(self.trim_time)
+        self.trim_range_changed.emit(self.trim_start_time, self.trim_end_time)
         self.trimmed_data_available.emit(self.data_trimmed)
+
+    def _invalidate_derived_analysis(self):
+        """Discard calculations whose array alignment depends on the active range."""
+        had_derived_data = any(
+            getattr(self, name, None) is not None
+            for name in (
+                "geometry_data",
+                "mechanics_payload",
+                "relaxation_payload",
+                "last_pull_stretch",
+            )
+        )
+
+        for name in ("first_segments", "second_segments", "_raw_geometry", "_smoothed_geometry"):
+            if hasattr(self, name):
+                delattr(self, name)
+
+        for name in (
+            "geometry_data",
+            "mechanics_payload",
+            "relaxation_payload",
+            "last_pull_stretch",
+            "last_pull_stress",
+            "p_spline",
+        ):
+            setattr(self, name, None)
+
+        self.voxel_arrays = []
+
+        if had_derived_data and self.task_manager is not None:
+            self.task_manager.status_updated.emit(
+                "Trim range changed - run Get Geometry again to refresh analysis results."
+            )
 
 
     ### region HEADER
@@ -199,8 +271,10 @@ class DataPipeline(QObject):
 
         # From here down, self.data is guaranteed to exist and have the right columns
         log.info(f"Data keys available: {self.data.keys()}")
-        self.max_distance_index = int(np.argmax(self.data["distance"]))
-        self.min_distance_index = int(np.argmin(self.data["distance"]))
+        self.max_distance_data_index = int(np.argmax(self.data["distance"]))
+        self.min_distance_data_index = int(np.argmin(self.data["distance"]))
+        self.max_distance_index = self.max_distance_data_index
+        self.min_distance_index = self.min_distance_data_index
         self.data_available.emit(self.data)
         if len([i for i, x in enumerate(self.data["cycle"]) if x == np.max(self.data['cycle'])]) < 5:
             self.last_cycle = np.max(self.data["cycle"]) - 1
@@ -326,24 +400,32 @@ class DataPipeline(QObject):
         if self.data_trimmed is None or self.data_trimmed.size == 0:
             return
 
-        # np.argmax/argmin return the integer row index.
-        # Since we only trim the tail, these row indices still map correctly
-        # to the original frame indices.
-        new_max_idx = int(np.argmax(self.data_trimmed["distance"]))
-        new_min_idx = int(np.argmin(self.data_trimmed["distance"]))
+        if len(self.active_frame_indices) != len(self.data_trimmed):
+            log.warning("Active frame mapping was missing or stale; rebuilding it from row positions.")
+            self.active_frame_indices = np.arange(len(self.data_trimmed), dtype=np.int64)
+
+        # Local indices address active telemetry arrays; source indices address video frames.
+        (
+            new_max_data_idx,
+            new_min_data_idx,
+            new_max_frame_idx,
+            new_min_frame_idx,
+        ) = map_distance_extrema_to_source(self.data_trimmed, self.active_frame_indices)
+
+        self.max_distance_data_index = new_max_data_idx
+        self.min_distance_data_index = new_min_data_idx
 
         frames_to_load = []
 
-        # Check if the max index got trimmed off
-        if new_max_idx != self.max_distance_index:
-            log.info(f"Max distance index changed from {self.max_distance_index} to {new_max_idx}")
-            self.max_distance_index = new_max_idx
+        # The ROI image cache is keyed by absolute source-frame index.
+        if new_max_frame_idx != self.max_distance_index:
+            log.info(f"Max distance frame changed from {self.max_distance_index} to {new_max_frame_idx}")
+            self.max_distance_index = new_max_frame_idx
             frames_to_load.append(self.max_distance_index)
 
-        # Check if the min index got trimmed off
-        if new_min_idx != self.min_distance_index:
-            log.info(f"Min distance index changed from {self.min_distance_index} to {new_min_idx}")
-            self.min_distance_index = new_min_idx
+        if new_min_frame_idx != self.min_distance_index:
+            log.info(f"Min distance frame changed from {self.min_distance_index} to {new_min_frame_idx}")
+            self.min_distance_index = new_min_frame_idx
             frames_to_load.append(self.min_distance_index)
 
         # If either index changed, send them to the worker to load the new frames.
@@ -775,19 +857,29 @@ class DataPipeline(QObject):
             print("Cannot calculate geometry: ROIs not fully established.")
             return
 
+        if self.data_trimmed is None or self.data_trimmed.size == 0:
+            print("Cannot calculate geometry: The active trim range is empty.")
+            return
+
         distances = self.data_trimmed["distance"]
+        frame_indices = np.asarray(self.active_frame_indices, dtype=np.int64)
+        if len(frame_indices) != len(distances):
+            print("Cannot calculate geometry: Active frame mapping is not aligned with telemetry data.")
+            return
 
         # Package a "snapshot" so the thread doesn't read live UI variables
         snapshot_config = {
             'file_path': self.video,
             'distances': distances,
-            'min_dist': distances[self.min_distance_index],
-            'max_dist': distances[self.max_distance_index],
+            'frame_indices': frame_indices,
+            'min_dist': distances[self.min_distance_data_index],
+            'max_dist': distances[self.max_distance_data_index],
             'roi_data': self.roi_data,  # QRects and dicts are safe to pass by reference if we only read them
             'conversion_factor': self.conversion_factor,
             'mu': getattr(self, 'mu', 0.05),  # Fallbacks in case apply_threshold wasn't run
             'gamma': getattr(self, 'gamma_val', 1.0),
-            'lambda1': getattr(self, 'lambda1', 1.0)
+            'lambda1': getattr(self, 'lambda1', 1.0),
+            'trim_revision': self.trim_revision,
         }
 
         # Queue the heavy-lifting task
@@ -801,6 +893,10 @@ class DataPipeline(QObject):
         """
         Callback triggered when the background task finishes successfully.
         """
+        if result.get("trim_revision", self.trim_revision) != self.trim_revision:
+            log.info("Discarding geometry computed for an outdated trim range.")
+            return
+
         print("Geometry computed successfully. Calculating dimensions...")
         self.first_segments = result["first_masks"]
         self.second_segments = result["second_masks"]
@@ -1599,6 +1695,18 @@ class DataPipeline(QObject):
         """Prepares the trimmed data and calculated mechanics for CSV export."""
         print("Gathering data for export...")
 
+        if (
+                self.data_trimmed is None
+                or self.data_trimmed.size == 0
+                or getattr(self, "geometry_data", None) is None
+                or getattr(self, "mechanics_payload", None) is None
+        ):
+            message = "Cannot export: run Get Geometry for the active trim range first."
+            print(message)
+            if self.task_manager is not None:
+                self.task_manager.status_updated.emit(message)
+            return
+
         # 2. Safely handle array lengths
         num_rows = len(self.data_trimmed)
 
@@ -1894,10 +2002,51 @@ class DataPipeline(QObject):
 
         print("Loaded session!")
         fixed_dict = deserialize_objects(state_dict)
+        has_saved_start_time = "trim_start_time" in fixed_dict
+        has_saved_end_time = "trim_end_time" in fixed_dict
+        has_saved_frame_indices = "active_frame_indices" in fixed_dict
         print("Setting variables...")
         for k, v in fixed_dict.items():
             setattr(self, k, v)
             print(k, v)
+
+        # Migrate sessions created before two-sided trimming was introduced.
+        source_times = None
+        if self.data is not None:
+            try:
+                source_times = np.asarray(self.data["time_s"], dtype=float)
+            except (KeyError, TypeError, ValueError):
+                source_times = None
+
+        if source_times is not None and source_times.size > 0:
+            if not has_saved_start_time:
+                self.trim_start_time = float(np.min(source_times))
+            if not has_saved_end_time:
+                self.trim_end_time = float(getattr(self, "trim_time", np.max(source_times)))
+            self.trim_time = self.trim_end_time
+
+            if not has_saved_frame_indices:
+                mask = (
+                    (source_times >= self.trim_start_time)
+                    & (source_times <= self.trim_end_time)
+                )
+                self.active_frame_indices = np.flatnonzero(mask).astype(np.int64, copy=False)
+
+        if self.data_trimmed is not None and self.data_trimmed.size > 0:
+            try:
+                (
+                    self.max_distance_data_index,
+                    self.min_distance_data_index,
+                    self.max_distance_index,
+                    self.min_distance_index,
+                ) = map_distance_extrema_to_source(
+                    self.data_trimmed,
+                    self.active_frame_indices,
+                )
+            except ValueError as exc:
+                log.warning("Could not restore trim index mapping from saved state: %s", exc)
+
+        self.trim_revision = int(getattr(self, "trim_revision", 0))
         print("Refreshing...")
         self.loaded_state = True
         self.backup_state = fixed_dict

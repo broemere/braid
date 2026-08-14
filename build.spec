@@ -2,7 +2,7 @@ import sys
 import os
 
 # --- Configuration ---
-app_version = os.environ.get('APP_VERSION', '0.9.5')
+app_version = os.environ.get('APP_VERSION', '0.9.6')
 target_arch = os.environ.get('PYINSTALLER_TARGET_ARCH')
 app_name = 'BRAID' if sys.platform == 'darwin' else f'BRAID_v{app_version}'
 
@@ -66,6 +66,7 @@ if sys.platform == 'darwin':
         name=f"{app_name}.app", # <-- DYNAMIC
         icon=icon_file,
         bundle_identifier=None,
+        version=app_version,
     )
 else:
     exe = EXE(

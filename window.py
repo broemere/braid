@@ -380,7 +380,6 @@ class MainWindow(QMainWindow):
         log.info(f"Update available: {new_version}")
 
         # Construct a friendly message with a link
-        repo_url = "https://github.com/broemere/braid/releases/latest"
         msg = (
             f"A new version of {APP_NAME} is available!<br><br>"
             f"Current version: <b>v{APP_VERSION}</b><br>"
