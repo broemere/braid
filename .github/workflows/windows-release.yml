@@ -33,6 +33,11 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
 
+      - name: Run regression tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m unittest discover -s tests -v
+
       - name: Read application version
         id: version
         shell: pwsh
@@ -73,6 +78,10 @@ jobs:
 
           gh release view $tag *> $null
           if ($LASTEXITCODE -eq 0) {
+            $tagCommit = gh api "repos/$env:GITHUB_REPOSITORY/commits/$tag" --jq .sha
+            if ($tagCommit -ne $env:GITHUB_SHA) {
+              throw "Release $tag points to $tagCommit, not this build commit $env:GITHUB_SHA. Bump the version instead of replacing the existing release asset."
+            }
             gh release upload $tag $archive --clobber
           } else {
             gh release create $tag $archive `

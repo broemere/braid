@@ -1,14 +1,16 @@
+import multiprocessing
 import sys
-import logging
-from window import MainWindow
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QPalette, QPixmap, QIcon
-from PySide6.QtWidgets import QApplication, QSplashScreen
-from config import APP_NAME, APP_VERSION, ORG
-from processing.resource_loader import setup_logging, load_icon
 
 
-if __name__ == '__main__':
+def run_application():
+    """Import and start the GUI only in the primary application process."""
+    from window import MainWindow
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QPalette, QPixmap, QIcon
+    from PySide6.QtWidgets import QApplication, QSplashScreen
+    from config import APP_NAME, APP_VERSION, ORG
+    from processing.resource_loader import setup_logging, load_icon
+
     log = setup_logging()
     log.info("Application starting...")
 
@@ -30,4 +32,15 @@ if __name__ == '__main__':
     win.show()
     splash.finish(win)    # Close splash when ready
 
-    sys.exit(app.exec())
+    return app.exec()
+
+
+def bootstrap(application_runner=None):
+    """Route frozen child processes before any GUI imports or initialization."""
+    multiprocessing.freeze_support()
+    runner = application_runner or run_application
+    return runner()
+
+
+if __name__ == '__main__':
+    sys.exit(bootstrap())

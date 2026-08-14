@@ -152,7 +152,17 @@ class AnalysisWidget(QWidget):
         self.pipeline.known_length_changed.connect(self._save_known_length)
         self.pipeline.scale_is_manual_changed.connect(self._save_scale_is_manual)
         self.pipeline.manual_conversion_factor_changed.connect(self._save_manual_conversion_factor)
+        self.pipeline.state_loaded.connect(self._restore_loaded_session_header)
         #self.pipeline.scale_changed.connect(self._save_scale)
+
+    @Slot()
+    def _restore_loaded_session_header(self):
+        """Refresh header fields after the pipeline applies a saved session."""
+        author = getattr(self.pipeline, "author", None)
+        if author:
+            self.tab_author.setText(str(author))
+        if self.pipeline.video:
+            self.file_pickers.set_video_label(str(self.pipeline.video))
 
     def _load_settings_into_pipeline(self):
         """Reads values from QSettings and populates the pipeline."""

@@ -8,7 +8,13 @@ import numpy as np
 from pathlib import Path
 from PySide6.QtCore import QObject, Signal, Slot, QTimer, SignalInstance
 #from processing.data_transform import zero_data, smooth_data, label_image, create_visual_from_labels, convert_numpy, restore_numpy, n_closest_numbers
-from processing.data_loader import frame_loader, geometry_worker, keep_largest_component, video_compiler_worker
+from processing.data_loader import (
+    frame_loader,
+    geometry_worker,
+    keep_largest_component,
+    validate_segmentation_mask,
+    video_compiler_worker,
+)
 from processing.data_transform import serialize_objects, deserialize_objects
 from processing.trimming import map_distance_extrema_to_source
 from config import APP_VERSION
@@ -67,6 +73,7 @@ class DataPipeline(QObject):
     dimension_images_ready = Signal(np.ndarray, np.ndarray)
 
     geometry_available = Signal(dict)
+    geometry_processing_changed = Signal(bool)
     video_compiled_ready = Signal(str)
     mechanics_available = Signal(dict)
 
@@ -137,8 +144,9 @@ class DataPipeline(QObject):
 
         self.layout = "vertical"
         self.voxel_arrays = []
+        self.geometry_in_progress = False
 
-        exported_file = None
+        self.exported_file = None
 
     @Slot(float, float, object, object)
     def set_trimmed_data(
@@ -849,23 +857,56 @@ class DataPipeline(QObject):
         """
         Packages current state data and kicks off the background calculation task.
         """
+        if self.geometry_in_progress:
+            self._geometry_warning(
+                "Geometry is already processing.",
+                "Wait for the current geometry job to finish before starting another one.",
+            )
+            return False
+
         if not self.video or self.data is None or "distance" not in self.data:
-            print("Cannot calculate geometry: Data or video not loaded.")
-            return
+            self._geometry_warning(
+                "Geometry cannot start because data or video is missing.",
+                "Import a supported video and its telemetry before running Get Geometry.",
+            )
+            return False
 
         if len(self.roi_data.get('min', [])) != 2 or len(self.roi_data.get('max', [])) != 2:
-            print("Cannot calculate geometry: ROIs not fully established.")
-            return
+            self._geometry_warning(
+                "Geometry requires two ROIs at minimum and maximum distance.",
+                "Complete the ROI and Seed tabs before running Get Geometry.",
+            )
+            return False
 
         if self.data_trimmed is None or self.data_trimmed.size == 0:
-            print("Cannot calculate geometry: The active trim range is empty.")
-            return
+            self._geometry_warning(
+                "Geometry cannot start because the active trim range is empty.",
+                "Apply a trim range containing at least one telemetry sample.",
+            )
+            return False
 
         distances = self.data_trimmed["distance"]
         frame_indices = np.asarray(self.active_frame_indices, dtype=np.int64)
         if len(frame_indices) != len(distances):
-            print("Cannot calculate geometry: Active frame mapping is not aligned with telemetry data.")
-            return
+            self._geometry_warning(
+                "Geometry cannot start because frame mapping is not aligned with telemetry.",
+                "Reset the trim range and try again. If the problem continues, reload the video.",
+            )
+            return False
+
+        if np.max(distances) == np.min(distances):
+            self._geometry_warning(
+                "Geometry requires a changing distance to interpolate the ROIs.",
+                "Choose a wider trim range that contains more than one distance value.",
+            )
+            return False
+
+        if self.task_manager is None:
+            self._geometry_warning(
+                "Geometry processing is not available in this session.",
+                "Open a new analysis session and reload the video.",
+            )
+            return False
 
         # Package a "snapshot" so the thread doesn't read live UI variables
         snapshot_config = {
@@ -883,11 +924,35 @@ class DataPipeline(QObject):
         }
 
         # Queue the heavy-lifting task
+        self._set_geometry_processing(True)
         self.task_manager.queue_task(
             geometry_worker,  # The pure worker function
             snapshot_config,  # The configuration dict
-            on_result=self._on_geometry_computed
+            on_result=self._on_geometry_computed,
+            on_error=self._on_geometry_failed,
         )
+        return True
+
+    def _geometry_warning(self, message, hint):
+        log.warning("%s %s", message, hint)
+        if self.task_manager is not None:
+            self.task_manager.status_updated.emit(message)
+        user_error(message, hint)
+
+    def _set_geometry_processing(self, active):
+        active = bool(active)
+        if self.geometry_in_progress != active:
+            self.geometry_in_progress = active
+            self.geometry_processing_changed.emit(active)
+
+    def _on_geometry_failed(self, err_tb):
+        exc, _traceback = err_tb
+        self._set_geometry_processing(False)
+        user_error(
+            "Geometry processing stopped without changing analysis results.",
+            f"{exc}\n\nReview the ROI and Seed selections, then try again.",
+        )
+        return True
 
     def _on_geometry_computed(self, result: dict):
         """
@@ -895,6 +960,7 @@ class DataPipeline(QObject):
         """
         if result.get("trim_revision", self.trim_revision) != self.trim_revision:
             log.info("Discarding geometry computed for an outdated trim range.")
+            self._set_geometry_processing(False)
             return
 
         print("Geometry computed successfully. Calculating dimensions...")
@@ -924,7 +990,8 @@ class DataPipeline(QObject):
         self.task_manager.queue_task(
             video_compiler_worker,
             snapshot_config,
-            on_result=self._on_video_compiled
+            on_result=self._on_video_compiled,
+            on_error=self._on_geometry_failed,
         )
 
     def _on_video_compiled(self, result: dict):
@@ -939,6 +1006,7 @@ class DataPipeline(QObject):
 
         directory_path = str(Path(path).parent)
         self.video_compiled_ready.emit(directory_path)
+        self._set_geometry_processing(False)
 
 
     # endregion
@@ -974,13 +1042,20 @@ class DataPipeline(QObject):
             z_masks_list = self.first_segments
 
         num_frames = len(xy_masks_list)
+        if num_frames == 0 or num_frames != len(z_masks_list):
+            raise ValueError(
+                "Geometry requires two aligned, non-empty segmentation sequences."
+            )
         cf = self.conversion_factor if self.conversion_factor > 0 else 1.0
 
         for i in range(num_frames):
             frames.append(i)
 
             # --- XY Image Processing ---
-            xy_mask = xy_masks_list[i]['mask']
+            xy_mask = validate_segmentation_mask(
+                xy_masks_list[i]['mask'],
+                f"Geometry frame {i} width segmentation",
+            )
             if xy_mask.size > 0:
                 x_sums = np.sum(xy_mask, axis=1)
                 valid_x = x_sums[x_sums > 0]
@@ -994,7 +1069,10 @@ class DataPipeline(QObject):
                 raw_y.append(0)
 
             # --- Z Image Processing ---
-            z_mask = z_masks_list[i]['mask']
+            z_mask = validate_segmentation_mask(
+                z_masks_list[i]['mask'],
+                f"Geometry frame {i} thickness segmentation",
+            )
             if z_mask.size > 0:
                 z_sums = np.sum(z_mask, axis=0)
                 valid_z = z_sums[z_sums > 0]
@@ -1081,7 +1159,12 @@ class DataPipeline(QObject):
             smooth_min_area = savgol_filter(min_areas_mm, window_length=window_length, polyorder=3, mode='nearest')
             smooth_volume = savgol_filter(volumes_mm3, window_length=window_length, polyorder=3, mode='nearest')
         else:
-            smooth_x, smooth_y, smooth_z, smooth_area, smooth_min_area = x_mm, y_mm, z_mm, areas_mm, min_areas_mm, volumes_mm3
+            smooth_x = x_mm
+            smooth_y = y_mm
+            smooth_z = z_mm
+            smooth_area = areas_mm
+            smooth_min_area = min_areas_mm
+            smooth_volume = volumes_mm3
 
         # --- Store Smoothed Data ---
         self._smoothed_geometry = {
@@ -1936,7 +2019,7 @@ class DataPipeline(QObject):
         # --- 2. Manual Exclusions ---
         # Explicitly remove large or runtime-only objects
         keys_to_exclude = [
-            'task_manager', 'loaded_state', 'backup_state',
+            'task_manager', 'loaded_state', 'backup_state', 'geometry_in_progress',
             'voxel_arrays',
             # 'left_leveled', 'right_leveled',
             # 'left_threshed', 'right_threshed',
@@ -1999,16 +2082,15 @@ class DataPipeline(QObject):
 
 
     def load_session(self, state_dict):
-
-        print("Loaded session!")
+        """Restore a saved analysis using the pipeline's current signal contract."""
         fixed_dict = deserialize_objects(state_dict)
         has_saved_start_time = "trim_start_time" in fixed_dict
         has_saved_end_time = "trim_end_time" in fixed_dict
         has_saved_frame_indices = "active_frame_indices" in fixed_dict
-        print("Setting variables...")
+        runtime_only_keys = {"task_manager", "geometry_in_progress", "loaded_state"}
         for k, v in fixed_dict.items():
-            setattr(self, k, v)
-            print(k, v)
+            if k not in runtime_only_keys:
+                setattr(self, k, v)
 
         # Migrate sessions created before two-sided trimming was introduced.
         source_times = None
@@ -2047,59 +2129,72 @@ class DataPipeline(QObject):
                 log.warning("Could not restore trim index mapping from saved state: %s", exc)
 
         self.trim_revision = int(getattr(self, "trim_revision", 0))
-        print("Refreshing...")
+        self.geometry_in_progress = False
         self.loaded_state = True
         self.backup_state = fixed_dict
         self.refresh_session()
 
     def refresh_session(self):
-        self.update_pipeline()
-        self.author_recieved.emit(self.author)
+        """Publish restored state through signals that exist in the current UI."""
         if self.video:
-            if sys.platform != self.platform or (sys.platform == "mac" and ":" in self.video) or (sys.platform == "win" and ":" not in self.video):
-                resolved_path = resolve_cross_platform_path(self.video)
-                log.info("File resolved:", resolved_path)
-                if resolved_path:
-                    self.video = str(resolved_path / Path(self.video).name)
-                    log.info("Cross Platform Filepath resolved", self.video)
-                    if self.csv_path:
-                        self.csv_path = str(resolved_path / Path(self.csv_path).name)
-                        log.info("Cross Platform Filepath resolved", self.csv_path)
-                    if self.exported_file:
-                        self.exported_file = str(resolved_path / Path(self.exported_file).name)
-                        log.info("Cross Platform Filepath resolved", self.exported_file)
             if not Path(self.video).exists():
                 mkv_path = Path(self.video).with_suffix(".mkv")
                 if mkv_path.exists():
                     log.info("Found MKV in place of original video file.")
                     self.video = str(mkv_path)
-        self.video_filename_updated.emit(self.video)
-        self.csv_filename_updated.emit(self.csv_path)
-        video_exists = Path(self.video).exists() if self.video else False
-        self.video_status_changed.emit(video_exists)
+
+        self.plot_selection_changed.emit(self.plot_selection)
+        self.cycle_selection_changed.emit(self.cycle_selection)
         self.known_length_changed.emit(self.known_length)
         self.pixel_length_changed.emit(self.pixel_length)
-        self.left_image_changed.emit(self.left_image)
-        self.right_image_changed.emit(self.right_image)
-        self.brightness_changed.emit(self.brightness)
-        self.contrast_changed.emit(self.contrast)
-        if self.left_image:
-            self.level_update()
-        self.threshold_changed.emit(self.threshold)
-        if self.left_threshed:
-            self.segment_image(self.left_threshed, "left")
-            self.left_threshed_old = self.left_threshed.copy()
-        if self.right_threshed:
-            self.segment_image(self.right_threshed, "right")
+        self.scale_is_manual_changed.emit(self.scale_is_manual)
+        self.manual_conversion_factor_changed.emit(self.manual_conversion_factor)
+        self.conversion_factor_changed.emit(self.conversion_factor)
+        self.scale_line_coords_changed.emit(self.scale_line_coords)
 
-            self.right_threshed_old = self.right_threshed.copy()
-        self._recalculate_conversion_factor()
-        print(self.scale_line_coords)
-        #self.scale_line_coords_changed.emit(self.scale_line_coords)
-        #self.thickness_changed.emit(self.thickness_data)
-        self.s_value_changed.emit(self.s_value)
-        self.n_ellipses_changed.emit(self.n_ellipses)
-        self.infusion_rate_changed.emit(self.infusion_rate)
+        if isinstance(self.left_image, np.ndarray):
+            self.left_image_changed.emit(self.left_image)
+
+        def cached_frame(index):
+            if not isinstance(self.frame_data, dict):
+                return None
+            return self.frame_data.get(index, self.frame_data.get(str(index)))
+
+        min_frame = cached_frame(self.min_distance_index)
+        max_frame = cached_frame(self.max_distance_index)
+        if isinstance(min_frame, np.ndarray):
+            self.roi_min_image_loaded.emit(min_frame)
+        if isinstance(max_frame, np.ndarray):
+            self.roi_max_image_loaded.emit(max_frame)
+
+        if isinstance(self.data, dict) and self.data:
+            self.data_available.emit(self.data)
+        if self.data_trimmed is not None and self.data_trimmed.size > 0:
+            self.trim_time_changed.emit(self.trim_time)
+            self.trim_range_changed.emit(self.trim_start_time, self.trim_end_time)
+            self.trimmed_data_available.emit(self.data_trimmed)
+
+        crop_pixmaps = []
+        for target in ("min", "max"):
+            for roi in self.roi_data.get(target, []):
+                crop = roi.get("crop_img")
+                if isinstance(crop, np.ndarray) and crop.size > 0:
+                    crop_pixmaps.append(numpy_to_qpixmap(crop))
+        if crop_pixmaps:
+            self.cropped_images_ready.emit(crop_pixmaps)
+
+        self.request_dimension_images()
+        if getattr(self, "geometry_data", None) is not None:
+            self.geometry_available.emit(self.geometry_data)
+        if getattr(self, "mechanics_payload", None) is not None:
+            self.mechanics_available.emit(self.mechanics_payload)
+        if getattr(self, "relaxation_payload", None) is not None:
+            self.relaxation_available.emit(self.relaxation_payload)
+        if hasattr(self, "s_value"):
+            self.s_value_changed.emit(self.s_value)
+
+        self.state_loaded.emit()
+        log.info("Saved analysis session restored.")
 
 
     # endregion

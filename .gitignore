@@ -1,4 +1,6 @@
 .venv/
+.venv-intel/
+.DS_Store
 .idea/
 data/
 build/
