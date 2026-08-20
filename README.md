@@ -19,6 +19,13 @@ BUTI Research Analysis & Inspection Dashboard
 
 A cross-platform application for performing mechanical analyses of BUTI experimental data.
 
+## Opening a recording from another application
+
+BRAID accepts a generic `--open <recording-path>` launch argument for TIFF,
+AVI, and MKV files. This lets acquisition tools hand BRAID an already-saved
+recording path without sharing application code or creating a runtime
+dependency; BRAID continues to work normally as a standalone analysis app.
+
 ## macOS installation
 
 Download the DMG that matches the Mac: `Silicon` for Apple silicon (M-series)

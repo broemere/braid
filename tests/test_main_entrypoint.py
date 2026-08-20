@@ -11,6 +11,22 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 class MainEntrypointTests(unittest.TestCase):
+    def test_extract_open_request_preserves_other_qt_arguments(self):
+        path, cleaned = main.extract_open_request(
+            ["BRAID", "-style", "Fusion", "--open", "/tmp/Run 4/video.tif"]
+        )
+
+        self.assertEqual(path, "/tmp/Run 4/video.tif")
+        self.assertEqual(cleaned, ["BRAID", "-style", "Fusion"])
+
+    def test_extract_open_request_accepts_equals_form(self):
+        path, cleaned = main.extract_open_request(
+            ["BRAID", "--open=/tmp/recording.tiff"]
+        )
+
+        self.assertEqual(path, "/tmp/recording.tiff")
+        self.assertEqual(cleaned, ["BRAID"])
+
     def test_bootstrap_calls_freeze_support_before_application_runner(self):
         calls = []
 
