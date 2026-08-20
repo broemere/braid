@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.10.0 - External recording handoff
+
+### Added
+
+- Added a generic `--open <recording-path>` launch argument for TIFF, AVI, and
+  MKV recordings.
+- Routed externally supplied recordings into the active analysis session after
+  validating that the file exists and uses a supported format.
+- Documented the path-only handoff so acquisition and analysis applications can
+  remain independently installed and operated.
+
 ## 0.9.7 - Stability update
 
 ### Fixed

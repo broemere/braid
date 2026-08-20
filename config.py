@@ -1,5 +1,5 @@
 APP_NAME = "BRAID"
-APP_VERSION = "0.9.7"
+APP_VERSION = "0.10.0"
 ORG = "TykockiLab"
 REPO_URL = "https://github.com/vr-oj/braid/releases/latest"
 SAVE_FILETYPE = ".braid"

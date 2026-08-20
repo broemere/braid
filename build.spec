@@ -2,7 +2,7 @@ import sys
 import os
 
 # --- Configuration ---
-app_version = os.environ.get('APP_VERSION', '0.9.7')
+app_version = os.environ.get('APP_VERSION', '0.10.0')
 target_arch = os.environ.get('PYINSTALLER_TARGET_ARCH')
 app_name = 'BRAID' if sys.platform == 'darwin' else f'BRAID_v{app_version}'
 
