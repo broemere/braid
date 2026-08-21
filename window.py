@@ -126,6 +126,36 @@ class MainWindow(QMainWindow):
         return index
 
     @Slot(str)
+    def open_video_path(self, path: str):
+        """Open a supported video path supplied by the user or another app."""
+        candidate = Path(path).expanduser()
+        if not candidate.is_file():
+            QMessageBox.warning(
+                self,
+                "Unable to Open Recording",
+                f"The selected recording does not exist:\n{candidate}",
+            )
+            return False
+        if candidate.suffix.lower() not in {".tif", ".tiff", ".avi", ".mkv"}:
+            QMessageBox.warning(
+                self,
+                "Unsupported Recording",
+                "BRAID can open TIFF, AVI, and MKV recordings.",
+            )
+            return False
+
+        analysis = self.super_tabs.currentWidget()
+        if analysis is None:
+            index = self.add_new_super_tab()
+            analysis = self.super_tabs.widget(index)
+        resolved = str(candidate.resolve())
+        analysis.on_file_selected(resolved)
+        self.raise_()
+        self.activateWindow()
+        log.info("Opened externally supplied recording: %s", resolved)
+        return True
+
+    @Slot(str)
     def on_tab_name_change_requested(self, new_name: str):
         """
         Sets the tab text for the widget that emitted the signal.

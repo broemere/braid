@@ -19,6 +19,24 @@ BUTI Research Analysis & Inspection Dashboard
 
 A cross-platform application for performing mechanical analyses of BUTI experimental data.
 
+## Windows installation
+
+1. Download `BRAID_Setup_<version>.exe` from the official GitHub release.
+2. Run the setup wizard and choose the installation folder.
+3. Launch BRAID from the Start menu or the optional desktop shortcut.
+
+The installer adds BRAID to Windows' installed-apps list and includes an
+uninstaller. It is not currently code-signed, so Windows SmartScreen may show
+an unknown-publisher warning. Only run an installer downloaded from the
+project's official GitHub release.
+
+## Opening a recording from another application
+
+BRAID accepts a generic `--open <recording-path>` launch argument for TIFF,
+AVI, and MKV files. This lets acquisition tools hand BRAID an already-saved
+recording path without sharing application code or creating a runtime
+dependency; BRAID continues to work normally as a standalone analysis app.
+
 ## macOS installation
 
 Download the DMG that matches the Mac: `Silicon` for Apple silicon (M-series)
@@ -35,3 +53,22 @@ Only override this warning for a BRAID DMG downloaded from the project's
 official GitHub release. A message that the app is damaged is not the expected
 unsigned-app warning; re-download the matching architecture build and report
 the problem rather than bypassing it with a Terminal command.
+
+## Building the Windows release installer
+
+BRAID uses `APP_VERSION` in `config.py` as its release version source. Install
+the pinned dependencies and Inno Setup 6, then run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\build-release.ps1
+```
+
+The release script checks the Python environment, runs the full test suite,
+builds the one-folder Windows application, compiles the setup wizard, and
+writes:
+
+- `installer_output\BRAID_Setup_<version>.exe`
+- `installer_output\BRAID_Setup_<version>.exe.sha256`
+
+BRAID releases are built on the official Windows packaging computer and
+uploaded manually; GitHub Actions is not used.
