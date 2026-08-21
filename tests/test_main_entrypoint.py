@@ -11,6 +11,18 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 class MainEntrypointTests(unittest.TestCase):
+    def test_launch_request_opens_a_recording_when_a_path_is_present(self):
+        self.assertEqual(
+            main.build_launch_request("C:/Data/Run 4/video.tif"),
+            {"action": "open", "path": "C:/Data/Run 4/video.tif"},
+        )
+
+    def test_launch_request_without_a_path_requests_another_window(self):
+        self.assertEqual(
+            main.build_launch_request(None),
+            {"action": "new_window"},
+        )
+
     def test_extract_open_request_preserves_other_qt_arguments(self):
         path, cleaned = main.extract_open_request(
             ["BRAID", "-style", "Fusion", "--open", "/tmp/Run 4/video.tif"]
