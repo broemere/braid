@@ -8,6 +8,9 @@
   MKV recordings.
 - Routed externally supplied recordings into the active analysis session after
   validating that the file exists and uses a supported format.
+- Forwarded later external recording requests to the running BRAID application,
+  opening them in new analysis tabs instead of separate windows while
+  preserving normal multi-window launches.
 - Documented the path-only handoff so acquisition and analysis applications can
   remain independently installed and operated.
 - Added a Windows setup wizard that installs BRAID into an application folder,

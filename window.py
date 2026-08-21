@@ -126,8 +126,8 @@ class MainWindow(QMainWindow):
         return index
 
     @Slot(str)
-    def open_video_path(self, path: str):
-        """Open a supported video path supplied by the user or another app."""
+    def open_video_path(self, path: str, new_session: bool = False):
+        """Open a supported path, optionally preserving an occupied session."""
         candidate = Path(path).expanduser()
         if not candidate.is_file():
             QMessageBox.warning(
@@ -145,6 +145,10 @@ class MainWindow(QMainWindow):
             return False
 
         analysis = self.super_tabs.currentWidget()
+        pipeline = getattr(analysis, "pipeline", None)
+        if new_session and getattr(pipeline, "video", None):
+            index = self.add_new_super_tab()
+            analysis = self.super_tabs.widget(index)
         if analysis is None:
             index = self.add_new_super_tab()
             analysis = self.super_tabs.widget(index)

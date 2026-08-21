@@ -37,6 +37,12 @@ AVI, and MKV files. This lets acquisition tools hand BRAID an already-saved
 recording path without sharing application code or creating a runtime
 dependency; BRAID continues to work normally as a standalone analysis app.
 
+When BRAID is already running, an external `--open` request is forwarded to
+its main window. The initial blank analysis tab is reused when available;
+otherwise the recording opens in a new analysis tab without replacing work in
+progress. Launching BRAID normally without `--open` still creates another
+separate window.
+
 ## macOS installation
 
 Download the DMG that matches the Mac: `Silicon` for Apple silicon (M-series)
