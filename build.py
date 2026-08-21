@@ -108,16 +108,17 @@ def archive(version, arch=None, label=None):
     elif platform_name == 'win':
         print("Platform is Windows. Creating .zip...")
 
-        # Look for the versioned folder or .exe file
-        source_dir = os.path.join('dist', app_versioned_name)
-        source_file = os.path.join('dist', f"{app_versioned_name}.exe")
+        # Windows uses a stable application directory/executable name so an
+        # installer can upgrade it in place. The archive remains versioned.
+        source_dir = os.path.join('dist', APP_BASE_NAME)
+        source_file = os.path.join('dist', f"{APP_BASE_NAME}.exe")
 
         base_dir_to_zip = None
         if os.path.isdir(source_dir):
-            base_dir_to_zip = app_versioned_name  # e.g., 'proper_v1.2.3'
+            base_dir_to_zip = APP_BASE_NAME
             print(f"Found --onedir build: {source_dir}")
         elif os.path.isfile(source_file):
-            base_dir_to_zip = f"{app_versioned_name}.exe"  # e.g., 'proper_v1.2.3.exe'
+            base_dir_to_zip = f"{APP_BASE_NAME}.exe"
             print(f"Found --onefile build: {source_file}")
 
         if not base_dir_to_zip:

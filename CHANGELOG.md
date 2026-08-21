@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.10.0 - External recording handoff
+## 1.0.0 - External recording handoff
 
 ### Added
 
@@ -10,6 +10,11 @@
   validating that the file exists and uses a supported format.
 - Documented the path-only handoff so acquisition and analysis applications can
   remain independently installed and operated.
+- Added a Windows setup wizard that installs BRAID into an application folder,
+  creates Start-menu and optional desktop shortcuts, and registers an
+  uninstaller.
+- Added a repeatable Windows release script that runs tests, builds the
+  application and installer, and produces a SHA-256 checksum.
 
 ## 0.9.7 - Stability update
 
@@ -35,8 +40,6 @@
 ### Release safeguards
 
 - Windows packaging now runs the regression suite before building.
-- An existing release asset can be replaced only when its tag points to the
-  exact commit being built. Otherwise, the workflow requires a version bump.
 - SHA-256 checksums are included for both macOS DMGs so uploaded and downloaded
   artifacts can be verified byte-for-byte.
 
