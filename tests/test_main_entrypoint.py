@@ -1,0 +1,70 @@
+import subprocess
+import sys
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+import main
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+class MainEntrypointTests(unittest.TestCase):
+    def test_launch_request_opens_a_recording_when_a_path_is_present(self):
+        self.assertEqual(
+            main.build_launch_request("C:/Data/Run 4/video.tif"),
+            {"action": "open", "path": "C:/Data/Run 4/video.tif"},
+        )
+
+    def test_launch_request_without_a_path_requests_another_window(self):
+        self.assertEqual(
+            main.build_launch_request(None),
+            {"action": "new_window"},
+        )
+
+    def test_extract_open_request_preserves_other_qt_arguments(self):
+        path, cleaned = main.extract_open_request(
+            ["BRAID", "-style", "Fusion", "--open", "/tmp/Run 4/video.tif"]
+        )
+
+        self.assertEqual(path, "/tmp/Run 4/video.tif")
+        self.assertEqual(cleaned, ["BRAID", "-style", "Fusion"])
+
+    def test_extract_open_request_accepts_equals_form(self):
+        path, cleaned = main.extract_open_request(
+            ["BRAID", "--open=/tmp/recording.tiff"]
+        )
+
+        self.assertEqual(path, "/tmp/recording.tiff")
+        self.assertEqual(cleaned, ["BRAID"])
+
+    def test_bootstrap_calls_freeze_support_before_application_runner(self):
+        calls = []
+
+        with patch(
+                "main.multiprocessing.freeze_support",
+                side_effect=lambda: calls.append("freeze_support"),
+        ):
+            result = main.bootstrap(lambda: calls.append("application") or 17)
+
+        self.assertEqual(calls, ["freeze_support", "application"])
+        self.assertEqual(result, 17)
+
+    def test_importing_main_does_not_import_the_gui(self):
+        script = (
+            "import sys; import main; "
+            "raise SystemExit(1 if 'window' in sys.modules or 'PySide6' in sys.modules else 0)"
+        )
+
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=REPO_ROOT,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0)
+
+
+if __name__ == "__main__":
+    unittest.main()

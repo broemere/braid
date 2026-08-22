@@ -3,10 +3,12 @@ import pyqtgraph as pg
 from PySide6.QtCore import Slot
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
-    QButtonGroup, QFrame, QLabel, QDoubleSpinBox
+    QButtonGroup, QFrame, QLabel, QDoubleSpinBox, QMessageBox
 )
 from data_pipeline import DataPipeline
 from config import PLOT_COLORS
+from processing.telemetry import build_analysis_records
+from processing.trimming import select_time_range
 
 
 class PlotTab(QWidget):
@@ -17,8 +19,10 @@ class PlotTab(QWidget):
         self.pipeline = pipeline
         self.data = np.array([])
         self.data_trimmed = np.array([])  # Active data for UI display
-        self.unique_cycles = []
+        self.unique_cycles = np.array([])
         self.plot_data_items = []
+        self._applied_start_time = 0.0
+        self._applied_end_time = 0.0
 
         self._init_ui()
         self.connect_signals()
@@ -117,17 +121,27 @@ class PlotTab(QWidget):
         container.setFrameShape(QFrame.StyledPanel)
         layout = QVBoxLayout(container)
 
-        title_label = QLabel("Optional: Trim data to end time:")
+        title_label = QLabel("Optional: Trim data by time:")
         title_label.setWordWrap(True)  # Allows text to drop to the next line instead of cutting off
         title_label.setStyleSheet("font-weight: bold; font-size: 14px; margin-bottom: 5px;")
         layout.addWidget(title_label)
 
-        self.trim_spinbox = QDoubleSpinBox()
-        self.trim_spinbox.setMinimum(0.0)
-        #self.trim_spinbox.setDecimals(3)
-        self.trim_spinbox.setSingleStep(0.5)
-        self.trim_spinbox.setSuffix(" sec")  # Appends the unit inside the spinbox natively
-        layout.addWidget(self.trim_spinbox)
+        layout.addWidget(QLabel("Start time:"))
+        self.trim_start_spinbox = QDoubleSpinBox()
+        self.trim_start_spinbox.setSingleStep(0.5)
+        self.trim_start_spinbox.setSuffix(" sec")
+        self.trim_start_spinbox.setEnabled(False)
+        layout.addWidget(self.trim_start_spinbox)
+
+        layout.addWidget(QLabel("End time:"))
+        self.trim_end_spinbox = QDoubleSpinBox()
+        self.trim_end_spinbox.setSingleStep(0.5)
+        self.trim_end_spinbox.setSuffix(" sec")
+        self.trim_end_spinbox.setEnabled(False)
+        layout.addWidget(self.trim_end_spinbox)
+
+        # Compatibility alias for code that referenced the original end-time control.
+        self.trim_spinbox = self.trim_end_spinbox
 
         self.trim_button = QPushButton("Trim Data")
         layout.addWidget(self.trim_button)
@@ -192,6 +206,7 @@ class PlotTab(QWidget):
         if not cycle_btn_found and self.cycle_selection_group.buttons():
             default_button = self.cycle_selection_group.buttons()[0]  # "All Cycles"
             default_button.setChecked(True)
+            self.pipeline.set_cycle_selection(default_button.text())
 
     def update_plot(self):
         """Core function to update the plot based on current button selections."""
@@ -260,30 +275,57 @@ class PlotTab(QWidget):
 
     @Slot()
     def apply_trimming(self):
-        """Slices the data up to the time entered in the spinbox."""
+        """Apply an inclusive start/end selection to the original dataset."""
         if self.data.size == 0:
             return
 
-        trim_time = self.trim_spinbox.value()
+        start_time = self.trim_start_spinbox.value()
+        end_time = self.trim_end_spinbox.value()
 
-        # Slice original data up to and including the entered time
-        mask = self.data["time_s"] <= trim_time
-        self.data_trimmed = self.data[mask]
+        if start_time > end_time:
+            self._show_invalid_trim_warning("Start time must be less than or equal to end time.")
+            return
+
+        selected_data, source_indices = select_time_range(self.data, start_time, end_time)
+        if selected_data.size == 0:
+            self._show_invalid_trim_warning("The selected time range does not contain any samples.")
+            return
+
+        self.data_trimmed = selected_data
         self.unique_cycles = np.unique(self.data_trimmed["cycle"])
-        if trim_time != float(np.max(self.data["time_s"])):
-            print(f"Trimming applied at {trim_time}")
+        self._applied_start_time = start_time
+        self._applied_end_time = end_time
+
+        min_time = float(np.min(self.data["time_s"]))
+        max_time = float(np.max(self.data["time_s"]))
+        if start_time != min_time or end_time != max_time:
+            print(f"Trimming applied from {start_time} to {end_time}")
 
         # Update the UI
         self._rebuild_cycle_buttons()
         self._restore_selections()
         self.update_plot()
 
-        self.pipeline.set_trimmed_data(trim_time, self.data_trimmed)
+        self.pipeline.set_trimmed_data(
+            start_time,
+            end_time,
+            self.data_trimmed,
+            source_indices,
+        )
+
+    def _show_invalid_trim_warning(self, message: str):
+        """Restore the applied values after rejecting a range."""
+        QMessageBox.warning(self, "Invalid Trim Range", message)
+        self.trim_start_spinbox.setValue(self._applied_start_time)
+        self.trim_end_spinbox.setValue(self._applied_end_time)
 
     @Slot()
     def reset_trimming(self):
-        """Resets the trim time to the maximum dataset time and applies it."""
-        self.trim_spinbox.setValue(self.trim_spinbox.maximum())
+        """Restore the full dataset time range and apply it."""
+        if self.data.size == 0:
+            return
+        self.trim_start_spinbox.setValue(float(np.min(self.data["time_s"])))
+        self.trim_end_spinbox.setValue(float(np.max(self.data["time_s"])))
         self.apply_trimming()
 
     @Slot(QPushButton)
@@ -303,31 +345,56 @@ class PlotTab(QWidget):
         """
         Slot to receive new data, convert it, rebuild UI components, and update the plot.
         """
-        print(f"Data received{data.keys()}")
+        print(f"Data received{data.keys() if data else []}")
         if not data or "cycle" not in data:
             print("PlotTab received invalid or empty data.")
             self.data = np.array([])
             self.data_trimmed = np.array([])
-            self.unique_cycles = []
+            self.unique_cycles = np.array([])
+            self.trim_start_spinbox.setEnabled(False)
+            self.trim_end_spinbox.setEnabled(False)
         else:
             print("PlotTab received new data.")
             try:
-                dtype = [(key, 'f8' if key != 'cycle' else 'i4') for key in data.keys()]
-                records = list(zip(*data.values()))
-                self.data = np.array(records, dtype=dtype)
+                self.data = build_analysis_records(data)
                 self.data_trimmed = np.copy(self.data)
                 self.unique_cycles = np.unique(self.data_trimmed["cycle"])
 
-                # Update Spinbox defaults to match new data maximums
+                # Update range defaults to match the complete new dataset.
+                min_time = float(np.min(self.data["time_s"]))
                 max_time = float(np.max(self.data["time_s"]))
-                self.trim_spinbox.setMaximum(max_time)
-                self.trim_spinbox.setValue(max_time)
+                self.trim_start_spinbox.setRange(min_time, max_time)
+                self.trim_end_spinbox.setRange(min_time, max_time)
+                self.trim_start_spinbox.setEnabled(True)
+                self.trim_end_spinbox.setEnabled(True)
+
+                if self.pipeline.loaded_state:
+                    start_time = float(getattr(self.pipeline, "trim_start_time", min_time))
+                    end_time = float(getattr(
+                        self.pipeline,
+                        "trim_end_time",
+                        getattr(self.pipeline, "trim_time", max_time),
+                    ))
+                    start_time = min(max(start_time, min_time), max_time)
+                    end_time = min(max(end_time, min_time), max_time)
+                    if start_time > end_time:
+                        start_time, end_time = min_time, max_time
+                else:
+                    start_time, end_time = min_time, max_time
+
+                self.trim_start_spinbox.setValue(start_time)
+                self.trim_end_spinbox.setValue(end_time)
+                self._applied_start_time = start_time
+                self._applied_end_time = end_time
 
             except Exception as e:
                 print(f"Could not convert data dictionary to structured numpy array: {e}")
                 self.data = np.array([])
                 self.data_trimmed = np.array([])
-                self.unique_cycles = []
-                self.trim_spinbox.setMaximum(0.0)
+                self.unique_cycles = np.array([])
+                self.trim_start_spinbox.setRange(0.0, 0.0)
+                self.trim_end_spinbox.setRange(0.0, 0.0)
+                self.trim_start_spinbox.setEnabled(False)
+                self.trim_end_spinbox.setEnabled(False)
 
         self.apply_trimming()

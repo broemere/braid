@@ -51,9 +51,9 @@ class TaskManager(QObject):
 
         log.info("Task Manager initialized.")
 
-    def queue_task(self, fn, *args, on_result=None, **kwargs):
+    def queue_task(self, fn, *args, on_result=None, on_error=None, **kwargs):
         log.info(f"Queueing task: {fn.__name__}")
-        task = (fn, args, kwargs, on_result)
+        task = (fn, args, kwargs, on_result, on_error)
         self.task_queue.append(task)
 
         # --- FINAL FIX: Check our own flag, not the unreliable pool count ---
@@ -83,11 +83,11 @@ class TaskManager(QObject):
             self.batch_finished.emit()
             return
 
-        fn, args, kwargs, on_result = self.task_queue.pop(0)
+        fn, args, kwargs, on_result, on_error = self.task_queue.pop(0)
 
         task_id = str(uuid.uuid4())
-        if on_result:
-            self.task_callbacks[task_id] = on_result
+        if on_result or on_error:
+            self.task_callbacks[task_id] = (on_result, on_error)
 
         worker = Worker(task_id, fn, *args, **kwargs)
 
@@ -103,12 +103,17 @@ class TaskManager(QObject):
     def _on_result(self, task_id, result):
         log.info(f"Task {task_id} finished successfully.")
 
-        callback = self.task_callbacks.pop(task_id, None)
+        callbacks = self.task_callbacks.pop(task_id, (None, None))
+        callback, error_callback = callbacks
         if callback:
             try:
                 callback(result)
             except Exception as e:
+                err_tb = (e, traceback.format_exc())
                 log.error(f"Error in 'on_result' callback for task {task_id}: {e}", exc_info=True)
+                if not self._handle_task_error(error_callback, err_tb):
+                    self.error_occurred.emit(err_tb)
+                    self.status_updated.emit(f"Error: {e}")
 
         self._run_next()
 
@@ -117,9 +122,21 @@ class TaskManager(QObject):
         exc, tb_str = err_tb
         log.error(f"Worker task {task_id} failed!\n{tb_str}")
 
-        self.error_occurred.emit(err_tb)
-        self.status_updated.emit(f"Error: {exc}")
-
-        self.task_callbacks.pop(task_id, None)
+        callbacks = self.task_callbacks.pop(task_id, (None, None))
+        _result_callback, error_callback = callbacks
+        if not self._handle_task_error(error_callback, err_tb):
+            self.error_occurred.emit(err_tb)
+            self.status_updated.emit(f"Error: {exc}")
 
         self._run_next()
+
+    @staticmethod
+    def _handle_task_error(error_callback, err_tb):
+        """Return True when a task-specific callback presents the failure."""
+        if error_callback is None:
+            return False
+        try:
+            return bool(error_callback(err_tb))
+        except Exception:
+            log.exception("Error in task-specific failure callback.")
+            return False

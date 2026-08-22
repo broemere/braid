@@ -1,7 +1,7 @@
 APP_NAME = "BRAID"
-APP_VERSION = "0.9"
+APP_VERSION = "1.0.0"
 ORG = "TykockiLab"
-REPO_URL = "https://github.com/broemere/braid/releases/latest"
+REPO_URL = "https://github.com/vr-oj/braid/releases/latest"
 SAVE_FILETYPE = ".braid"
 PLOT_COLORS = [
     '#1f77b4',  # Bright Blue

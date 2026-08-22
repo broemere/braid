@@ -6,6 +6,7 @@ from config import APP_NAME, APP_VERSION, REPO_URL, SAVE_FILETYPE
 from processing.task_manager import TaskManager
 from widgets.status_bar import StatusBarWidget
 from widgets.analysis_widget import AnalysisWidget
+from widgets.update_checker import UpdateChecker
 from widgets.circle_widget import make_circle_icon, get_color
 from widgets.error_bus import bus
 import os
@@ -123,6 +124,40 @@ class MainWindow(QMainWindow):
             self.super_tabs.setCurrentIndex(index)
         log.info(f"Added new super tab: '{tab_name}'")
         return index
+
+    @Slot(str)
+    def open_video_path(self, path: str, new_session: bool = False):
+        """Open a supported path, optionally preserving an occupied session."""
+        candidate = Path(path).expanduser()
+        if not candidate.is_file():
+            QMessageBox.warning(
+                self,
+                "Unable to Open Recording",
+                f"The selected recording does not exist:\n{candidate}",
+            )
+            return False
+        if candidate.suffix.lower() not in {".tif", ".tiff", ".avi", ".mkv"}:
+            QMessageBox.warning(
+                self,
+                "Unsupported Recording",
+                "BRAID can open TIFF, AVI, and MKV recordings.",
+            )
+            return False
+
+        analysis = self.super_tabs.currentWidget()
+        pipeline = getattr(analysis, "pipeline", None)
+        if new_session and getattr(pipeline, "video", None):
+            index = self.add_new_super_tab()
+            analysis = self.super_tabs.widget(index)
+        if analysis is None:
+            index = self.add_new_super_tab()
+            analysis = self.super_tabs.widget(index)
+        resolved = str(candidate.resolve())
+        analysis.on_file_selected(resolved)
+        self.raise_()
+        self.activateWindow()
+        log.info("Opened externally supplied recording: %s", resolved)
+        return True
 
     @Slot(str)
     def on_tab_name_change_requested(self, new_name: str):
@@ -379,7 +414,6 @@ class MainWindow(QMainWindow):
         log.info(f"Update available: {new_version}")
 
         # Construct a friendly message with a link
-        repo_url = "https://github.com/broemere/braid/releases/latest"
         msg = (
             f"A new version of {APP_NAME} is available!<br><br>"
             f"Current version: <b>v{APP_VERSION}</b><br>"

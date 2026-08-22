@@ -1,0 +1,2 @@
+5c22b2c58eacf42b92b6cf05b8ed5dad7ae5de4a7b250df3dff34a2e91879658  BRAID_v1.0.0_Silicon_mac.dmg
+1a73bdf07a1d0327355b819341870b3a58407a5adf17945174a9411add117918  BRAID_v1.0.0_Intel_mac.dmg

@@ -4,12 +4,13 @@ import re
 import shutil
 import subprocess
 import sys
+import platform
 
 # --- Configuration ---
 APP_SCRIPT = 'main.py'
 CONFIG_SCRIPT = 'config.py'
 SPEC_FILE = 'build.spec'
-APP_BASE_NAME = 'braid'
+APP_BASE_NAME = 'BRAID'
 
 
 def get_version():
@@ -43,32 +44,33 @@ def clean():
     print("Clean complete.\n")
 
 
-def build(version):
-    """Runs the PyInstaller command after setting the version environment variable."""
-    print("--- Running PyInstaller ---")
+def build(version, arch=None, label=None):
+    """Runs PyInstaller after setting version and optional macOS architecture."""
+    build_name = f"{label} ({arch})" if label and arch else "default"
+    print(f"--- Running PyInstaller for {build_name} ---")
 
-    # Set the version in an environment variable for the spec file to read (only for this process, not system)
     env = os.environ.copy()
     env['APP_VERSION'] = version
+    if arch:
+        env['PYINSTALLER_TARGET_ARCH'] = arch
 
-    command = ['pyinstaller', SPEC_FILE, '--clean']
+    command = [sys.executable, '-m', 'PyInstaller', SPEC_FILE, '--clean', '--noconfirm']
 
     print(f"Executing: {' '.join(command)}")
-    # Pass the modified environment to the subprocess
     subprocess.run(command, check=True, env=env)
     print("PyInstaller build successful!\n")
 
 
-def archive(version):
-    """Creates a distributable ZIP archive of the build."""
+def archive(version, arch=None, label=None):
+    """Creates a distributable archive of the build."""
     print("--- Creating distributable archive ---")
-    platform = 'mac' if sys.platform == 'darwin' else 'win'
+    platform_name = 'mac' if sys.platform == 'darwin' else 'win'
     app_versioned_name = f"{APP_BASE_NAME}_v{version}"
 
     # --- macOS DMG Creation ---
-    if platform == 'mac':
+    if platform_name == 'mac':
         print("Platform is macOS. Creating .dmg...")
-        source_app_path = os.path.join('dist', f"{app_versioned_name}.app")
+        source_app_path = os.path.join('dist', 'BRAID.app')
         # Check that the .app bundle exists
         if not os.path.exists(source_app_path):
             print(f"Error: Cannot create DMG. Source app not found at:")
@@ -76,12 +78,13 @@ def archive(version):
             print("Ensure your .spec file is set to create a windowed .app bundle.")
             return
 
-        final_dmg_path = os.path.join('dist', f"{app_versioned_name}_{platform}.dmg")
+        dmg_label = label or arch or platform_name
+        final_dmg_path = os.path.join('dist', f"BRAID_v{version}_{dmg_label}_{platform_name}.dmg")
         print(f"Creating {final_dmg_path}...")
 
         command = [
             'hdiutil', 'create',
-            '-volname', f"{APP_BASE_NAME} v{version}",  #Name of the volume when the user opens the .dmg
+            '-volname', f"BRAID {version} {dmg_label}",
             '-srcfolder', source_app_path,  # Path to the .app to include
             '-ov',
             '-format', 'UDZO',
@@ -91,7 +94,6 @@ def archive(version):
         print(f"Executing: {' '.join(command)}")
         try:
             subprocess.run(command, check=True, capture_output=True, text=True)
-            print(f"Successfully created archive: {final_dmg_path}\n")
         except subprocess.CalledProcessError as e:
             print("--- HDIUTIL FAILED ---")
             print("STDERR:", e.stderr)
@@ -100,21 +102,23 @@ def archive(version):
             print("--- HDIUTIL FAILED ---")
             print("Error: 'hdiutil' command not found.")
             return
+        print(f"Successfully created archive: {final_dmg_path}\n")
 
     # --- Windows ZIP Creation ---
-    elif platform == 'win':
+    elif platform_name == 'win':
         print("Platform is Windows. Creating .zip...")
 
-        # Look for the versioned folder or .exe file
-        source_dir = os.path.join('dist', app_versioned_name)
-        source_file = os.path.join('dist', f"{app_versioned_name}.exe")
+        # Windows uses a stable application directory/executable name so an
+        # installer can upgrade it in place. The archive remains versioned.
+        source_dir = os.path.join('dist', APP_BASE_NAME)
+        source_file = os.path.join('dist', f"{APP_BASE_NAME}.exe")
 
         base_dir_to_zip = None
         if os.path.isdir(source_dir):
-            base_dir_to_zip = app_versioned_name  # e.g., 'proper_v1.2.3'
+            base_dir_to_zip = APP_BASE_NAME
             print(f"Found --onedir build: {source_dir}")
         elif os.path.isfile(source_file):
-            base_dir_to_zip = f"{app_versioned_name}.exe"  # e.g., 'proper_v1.2.3.exe'
+            base_dir_to_zip = f"{APP_BASE_NAME}.exe"
             print(f"Found --onefile build: {source_file}")
 
         if not base_dir_to_zip:
@@ -122,7 +126,7 @@ def archive(version):
             print("PyInstaller build may have failed or produced unexpected output.")
             return
 
-        archive_path_without_ext = os.path.join('dist', f"{app_versioned_name}_{platform}")
+        archive_path_without_ext = os.path.join('dist', f"{app_versioned_name}_{platform_name}")
         print(f"Zipping '{base_dir_to_zip}' into '{archive_path_without_ext}.zip'...")
 
         shutil.make_archive(
@@ -137,10 +141,22 @@ def archive(version):
 if __name__ == "__main__":
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
     try:
-        #clean()
+        # clean()
         app_version = get_version()
-        build(app_version)
-        archive(app_version)
+
+        if sys.platform == 'darwin':
+            arch = platform.machine()
+            labels = {"arm64": "Silicon", "x86_64": "Intel"}
+
+            if arch not in labels:
+                raise RuntimeError(f"Unsupported macOS architecture: {arch}")
+
+            build(app_version, arch, labels[arch])
+            archive(app_version, arch, labels[arch])
+        else:
+            build(app_version)
+            archive(app_version)
+
         print("✅ Build process complete!")
     except Exception as e:
         print(f"\n--- ❌ BUILD FAILED ---")

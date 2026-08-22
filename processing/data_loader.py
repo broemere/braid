@@ -10,6 +10,7 @@ from skimage.segmentation import chan_vese
 from skimage.draw import rectangle, ellipse
 from PySide6.QtCore import QRect
 from processing.resource_loader import resource_path
+from processing.trimming import iter_selected_frames
 import concurrent.futures
 import multiprocessing
 from pathlib import Path
@@ -566,6 +567,7 @@ def _interpolate_rois_worker(roi_data: dict, pct: float) -> list[dict]:
 def geometry_worker(signals, config: dict):
     file_path = config['file_path']
     distances = config['distances']
+    frame_indices = np.asarray(config.get('frame_indices', np.arange(len(distances))), dtype=np.int64)
     min_dist = config['min_dist']
     max_dist = config['max_dist']
     roi_data = config['roi_data']
@@ -577,40 +579,21 @@ def geometry_worker(signals, config: dict):
     frames_out = []
     width_masks_out, thickness_masks_out = [], []
 
-    # Determine the file type once
-    file_ext = os.path.splitext(file_path)[1].lower()
     total_frames = len(distances)
+    if len(frame_indices) != total_frames:
+        raise ValueError("Geometry distances and source-frame indices must have equal lengths.")
+    if total_frames == 0:
+        raise ValueError("Geometry cannot run without any retained frames.")
+    if max_dist == min_dist:
+        raise ValueError(
+            "Geometry cannot interpolate ROIs because all retained distance values are identical."
+        )
 
     # Get optimal core count (leave one or two for the OS/GUI)
     max_workers = max(1, multiprocessing.cpu_count() - 2)
 
     width_results = {}
     thickness_results = {}
-
-    # ---------------------------------------------------------
-    # Helper Generator: Abstracts the file reading logic
-    # ---------------------------------------------------------
-    def frame_generator():
-        if file_ext in ['.tif', '.tiff']:
-            with TiffFile(file_path) as tif:
-                for idx in range(total_frames):
-                    yield tif.pages[idx].asarray()
-
-        elif file_ext == '.mkv':
-            cap = cv2.VideoCapture(file_path)
-            if not cap.isOpened():
-                raise IOError(f"Worker failed to open video file: {file_path}")
-            try:
-                for _ in range(total_frames):
-                    ret, frame_data = cap.read()
-                    if not ret:
-                        raise RuntimeError("Video ended prematurely before processing all distances.")
-                    yield frame_data
-            finally:
-                cap.release()  # Ensures the video file is safely closed even on error
-
-        else:
-            raise ValueError(f"Unsupported geometry file format: {file_ext}")
 
     # Start the multiprocessing pool
     with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
@@ -620,7 +603,7 @@ def geometry_worker(signals, config: dict):
 
         # --- PRODUCER LOOP ---
         # Zip the distances array with our new unified frame generator
-        for i, (distance, frame) in enumerate(zip(distances, frame_generator())):
+        for i, (distance, frame) in enumerate(zip(distances, iter_selected_frames(file_path, frame_indices))):
 
             # 1. Calculate percentage and clamp it mathematically
             pct = (distance - min_dist) / (max_dist - min_dist)
@@ -646,18 +629,19 @@ def geometry_worker(signals, config: dict):
 
                 # 2. GENERATE SEED MASK HERE
                 if crop.size == 0:
-                    dimensions.append(0)
-                    empty_mask = {'mask': np.array([], dtype=bool), 'offset_x': 0, 'offset_y': 0}
-                    if roi_idx == 0:
-                        width_masks_out.append(empty_mask)
-                    else:
-                        thickness_masks_out.append(empty_mask)
-                    continue
+                    raise ValueError(
+                        f"Geometry frame {i}, ROI {roi_idx + 1} produced an empty image crop."
+                    )
 
                 # Generate Seed Mask
                 mask_shape = crop.shape
                 seed_mask = np.zeros(mask_shape, dtype=bool)
                 coords = roi['seed_coords']
+
+                if not roi.get('seed_shape_type') or not coords:
+                    raise ValueError(
+                        f"Geometry frame {i}, ROI {roi_idx + 1} is missing a seed shape."
+                    )
 
                 if roi['seed_shape_type'] == 'rect':
                     start = (coords['y'], coords['x'])
@@ -708,15 +692,35 @@ def geometry_worker(signals, config: dict):
                     signals.progress.emit(progress_pct)
 
             except Exception as exc:
-                print(f"Worker generated an exception: {exc}")
+                raise RuntimeError(f"Segmentation worker failed: {exc}") from exc
 
     # Reconstruct the ordered lists from the dictionaries
+    missing_width = [i for i in range(total_frames) if i not in width_results]
+    missing_thickness = [i for i in range(total_frames) if i not in thickness_results]
+    if missing_width or missing_thickness:
+        raise RuntimeError(
+            "Geometry processing did not return every expected segmentation result."
+        )
+
     width_masks_out = [width_results[i] for i in range(total_frames)]
     thickness_masks_out = [thickness_results[i] for i in range(total_frames)]
 
+    for i, (width_item, thickness_item) in enumerate(
+            zip(width_masks_out, thickness_masks_out)
+    ):
+        validate_segmentation_mask(
+            width_item['mask'],
+            f"Geometry frame {i} width segmentation",
+        )
+        validate_segmentation_mask(
+            thickness_item['mask'],
+            f"Geometry frame {i} thickness segmentation",
+        )
+
     return {
         'first_masks': width_masks_out,
-        'second_masks': thickness_masks_out
+        'second_masks': thickness_masks_out,
+        'trim_revision': config.get('trim_revision', 0),
     }
 
 def keep_largest_component(mask: np.ndarray, connectivity: int = 8) -> np.ndarray:
@@ -835,9 +839,21 @@ def compute_chan_vese_worker(payload: dict):
     }
 
 
+def validate_segmentation_mask(mask, context="Segmentation mask"):
+    """Return a valid 2D mask or stop before downstream geometry math runs."""
+    mask = np.asarray(mask)
+    if mask.size == 0:
+        raise ValueError(f"{context} is empty.")
+    if mask.ndim != 2:
+        raise ValueError(f"{context} must be two-dimensional; received shape {mask.shape}.")
+    if not np.any(mask):
+        raise ValueError(f"{context} contains no segmented object.")
+    return mask
+
+
 def _normalize_and_format_mask(mask):
     """Standalone helper for formatting the mask before writing."""
-    mask = np.array(mask)
+    mask = validate_segmentation_mask(mask, "Threshold video mask")
     if mask.max() <= 1.0 and mask.max() > 0:
         mask = (mask * 255.0)
     if mask.dtype != np.uint8:
@@ -854,12 +870,23 @@ def video_compiler_worker(signals, config: dict):
     first_segments = config['first_segments']
     second_segments = config['second_segments']
 
+    if not first_segments or len(first_segments) != len(second_segments):
+        raise ValueError(
+            "Threshold video requires two aligned, non-empty segmentation sequences."
+        )
+
     signals.message.emit("Compiling threshold video...")
 
     max_h1, max_h2, max_w = 0, 0, 0
-    for f_item, s_item in zip(first_segments, second_segments):
-        h1, w1 = np.array(f_item['mask']).shape[:2]
-        h2, w2 = np.array(s_item['mask']).shape[:2]
+    for i, (f_item, s_item) in enumerate(zip(first_segments, second_segments)):
+        first_mask = validate_segmentation_mask(
+            f_item['mask'], f"Threshold video frame {i} first segmentation"
+        )
+        second_mask = validate_segmentation_mask(
+            s_item['mask'], f"Threshold video frame {i} second segmentation"
+        )
+        h1, w1 = first_mask.shape
+        h2, w2 = second_mask.shape
         if h1 > max_h1: max_h1 = h1
         if h2 > max_h2: max_h2 = h2
         if w1 > max_w: max_w = w1

@@ -163,6 +163,9 @@ class GeometryTab(QWidget):
 
         # Pipeline -> UI
         self.pipeline.geometry_available.connect(self.on_new_data_received)
+        self.pipeline.geometry_processing_changed.connect(
+            lambda active: self.btn_get_geometry.setEnabled(not active)
+        )
         self.pipeline.dimension_images_ready.connect(self.on_dimension_images_ready)
         self.pipeline.video_compiled_ready.connect(self.on_video_compiled)
         self.btn_open_folder.clicked.connect(self.on_open_folder_clicked)

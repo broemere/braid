@@ -1,9 +1,12 @@
-import numpy as np
-import cv2
-from PySide6.QtGui import QImage, QPixmap
+import ast
 import logging
-from pathlib import Path
 from collections import OrderedDict
+from pathlib import Path
+
+import cv2
+import numpy as np
+from PySide6.QtGui import QImage, QPixmap
+
 log = logging.getLogger(__name__)
 
 def numpy_to_qpixmap(numpy_array: np.ndarray) -> QPixmap:
@@ -97,7 +100,21 @@ def deserialize_objects(obj):
     """
     # 1) Reverse of our special-encoded ndarray
     if isinstance(obj, dict) and "__ndarray__" in obj:
-        arr = np.array(obj["__ndarray__"], dtype=np.dtype(obj.get("dtype", None)))
+        dtype_value = obj.get("dtype", None)
+        try:
+            dtype = np.dtype(dtype_value)
+        except TypeError:
+            # Legacy BRAID sessions store structured dtypes as their repr string.
+            # literal_eval safely recovers the list of field descriptors.
+            dtype = np.dtype(ast.literal_eval(dtype_value))
+
+        array_data = obj["__ndarray__"]
+        if dtype.names and isinstance(array_data, list):
+            # JSON converts each structured record tuple into a list. NumPy needs
+            # the records converted back to tuples to preserve the 1D table shape.
+            array_data = [tuple(record) for record in array_data]
+
+        arr = np.array(array_data, dtype=dtype)
         if "shape" in obj:
             arr = arr.reshape(obj["shape"])
         return arr

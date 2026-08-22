@@ -1,9 +1,13 @@
 .venv/
+.venv-intel/
+.DS_Store
 .idea/
 data/
 build/
 dist/
+installer_output/
 __pycache__/
 *.py[cod]
 braid.log
 braid.log.1
+/.venv-arm64
